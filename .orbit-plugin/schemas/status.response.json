@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.status response",
+  "type": "object",
+  "properties": {
+    "version": { "type": "string", "description": "The plugin version answering the call." },
+    "transport": {
+      "type": "string",
+      "enum": ["not_implemented"],
+      "description": "Mail transport state. `not_implemented` until decision channel slice 5 lands."
+    },
+    "secrets": {
+      "type": "object",
+      "description": "Each declared secret name mapped to whether Orbit delivered a value. Never a value.",
+      "properties": {
+        "smtp_password": { "$ref": "#/$defs/presence" },
+        "imap_password": { "$ref": "#/$defs/presence" },
+        "channel_key": { "$ref": "#/$defs/presence" }
+      },
+      "required": ["smtp_password", "imap_password", "channel_key"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["version", "transport", "secrets"],
+  "additionalProperties": false,
+  "$defs": {
+    "presence": { "type": "string", "enum": ["set", "unset"] }
+  }
+}

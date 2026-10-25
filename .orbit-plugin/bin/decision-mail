@@ -1,0 +1,59 @@
+#!/bin/sh
+# Orbit exec backend launcher (manifest backend.command).
+#
+# The runtime is the Python standard library only, so there is no environment to
+# sync: uv finds (or, on first use, installs into plugin state) a Python >= 3.12,
+# and the package runs straight from the plugin root's src/. The plugin root is
+# read-only under the sandbox and may hold no symlinks, so everything written --
+# a uv-managed interpreter, uv's cache, TMPDIR -- lives under plugin state.
+set -eu
+
+# Everything this launcher and its children create is owner-only.
+umask 077
+
+fail() {
+    # Drain the request so Orbit reads our envelope rather than EPIPE.
+    cat >/dev/null 2>&1 || true
+    printf '{"ok":false,"error":{"code":"%s","message":"%s","retryable":false}}\n' "$1" "$2"
+    exit 0
+}
+
+[ -n "${ORBIT_PLUGIN_ROOT:-}" ] || fail launcher_env "ORBIT_PLUGIN_ROOT is not set"
+[ -n "${ORBIT_PLUGIN_STATE:-}" ] || fail launcher_env "ORBIT_PLUGIN_STATE is not set"
+
+# Orbit grants the uv it resolved at enable (requires.programs). `[ -x ]` is not
+# proof under Landlock (access(2) can say yes while exec is refused), so probe.
+uv_bin=$(command -v uv 2>/dev/null || true)
+if [ -z "$uv_bin" ]; then
+    for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+        if "$candidate" --version >/dev/null 2>&1; then uv_bin=$candidate; break; fi
+    done
+fi
+[ -n "$uv_bin" ] || fail uv_not_found "uv is not executable by the plugin backend; put it on the caller PATH and re-run orbit plugin enable decision-mail"
+
+export UV_CACHE_DIR="$ORBIT_PLUGIN_STATE/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$ORBIT_PLUGIN_STATE/uv-python"
+export UV_PYTHON_BIN_DIR="$ORBIT_PLUGIN_STATE/uv-python/bin"
+export UV_NO_PROGRESS=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$ORBIT_PLUGIN_ROOT/src"
+export TMPDIR="$ORBIT_PLUGIN_STATE/tmp"
+mkdir -p "$TMPDIR"
+
+want=">=3.12"
+py=$("$uv_bin" python find --no-project --no-config "$want" 2>/dev/null </dev/null || true)
+if [ -z "$py" ]; then
+    # Bound the first-use install: TERM at 300s, KILL 10s later. Without a
+    # runnable timeout(1) (stock macOS has none) the host's per-call timeout
+    # is the only bound.
+    bound=""
+    if timeout 5 true >/dev/null 2>&1; then bound="timeout -k 10 300"; fi
+    # $bound is deliberately unquoted: empty, or the command and its arguments.
+    $bound "$uv_bin" python install --no-config --quiet 3.12 </dev/null >&2 \
+        || fail interpreter_install "uv could not install Python 3.12 into plugin state (the first call needs network); see stderr"
+    py=$("$uv_bin" python find --no-project --no-config "$want" 2>/dev/null </dev/null || true)
+    [ -n "$py" ] || fail interpreter_not_found "no Python $want is available to the plugin backend after install"
+fi
+
+# -s: ignore the user site; the package is found through PYTHONPATH only.
+exec "$py" -s -m decision_mail orbit-tool

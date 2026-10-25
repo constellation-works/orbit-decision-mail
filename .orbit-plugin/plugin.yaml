@@ -1,0 +1,57 @@
+schemaVersion: 2
+kind: Plugin
+metadata:
+  name: decision-mail
+  version: 0.1.0
+  description: >-
+    Email transport for Orbit's human decision channel: mails decision requests on
+    held work over SMTP, polls a dedicated mailbox over IMAP, authenticates replies
+    and submits them through orbit.decision.submit. Scaffold: only `status` exists
+    until decision channel slice 5 lands.
+  homepage: https://github.com/constellation-works/orbit-decision-mail
+spec:
+  requires:
+    orbit: ">=0.33.0 <1.0.0"
+    host_api: 1
+    platforms: [linux, macos]
+    programs: [uv]
+
+  backend:
+    type: exec
+    command: bin/decision-mail
+    args: [orbit-tool]
+    timeout_ms: 60000
+    sandbox: default
+
+  permissions:
+    fs:
+      # The interpreter uv provides, its cache and bytecode live in plugin state.
+      write: ["{{plugin_state}}"]
+    # SMTP and IMAP to the channel mailbox; also the first call's interpreter fetch.
+    network: any
+
+  secrets:
+    - name: smtp_password
+      description: Password or app password for sending from the channel mailbox over SMTP.
+      rotatable: false
+    - name: imap_password
+      description: Password or app password for polling the channel mailbox over IMAP.
+      rotatable: false
+    - name: channel_key
+      description: >-
+        HMAC key minted by `orbit decision channel register email`, used to render reply
+        tokens. Core holds the mirror it verifies against.
+      rotatable: false
+
+  tools:
+    - name: status
+      description: >-
+        Report the plugin version, whether the mail transport is implemented, and which
+        declared secrets are set (names only; never a value). Reads nothing outside the
+        call envelope, contacts no server and writes nothing.
+      execution_kind: read_only
+      mcp_scope: workspace
+      input_schema: { $ref: schemas/status.request.json }
+      output_schema: { $ref: schemas/status.response.json }
+
+  tests: [tests/conformance/*.yaml]

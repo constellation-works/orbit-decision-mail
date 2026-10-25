@@ -1,0 +1,22 @@
+schemaVersion: 1
+kind: PluginTest
+tests:
+  # `orbit plugin test` never opens the secret store, so every declared secret
+  # reads as unset here.
+  - name: status_with_no_secrets_set
+    tool: status
+    input: {}
+    expect:
+      output:
+        version: 0.1.0
+        transport: not_implemented
+        secrets:
+          smtp_password: unset
+          imap_password: unset
+          channel_key: unset
+  - name: status_refuses_unknown_input
+    tool: status
+    input: {"verbose": true}
+    expect:
+      error:
+        code: invalid_argument
