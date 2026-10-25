@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "[plugins.decision-mail] config",
+  "description": "The channel mailbox and its sender allowlist. Passwords and the channel key are plugin secrets, never config.",
+  "type": "object",
+  "properties": {
+    "address": { "type": "string", "description": "The channel mailbox address requests are sent from and replies arrive at (user@domain)." },
+    "notify_to": { "type": "string", "description": "The operator address requests are mailed to; a reused-token warning goes here too." },
+    "allowed_senders": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Addresses whose replies are accepted. Everything else is dropped without a reply."
+    },
+    "authserv_id": { "type": "string", "description": "The mailbox provider's Authentication-Results authserv-id (for example mx.google.com); only its topmost stamp is read." },
+    "channel": { "type": "string", "default": "email", "description": "The registered decision channel name submissions use." },
+    "key_epoch": { "type": "integer", "minimum": 1, "default": 1, "description": "The channel's current key epoch, as `orbit decision channel list` shows it; tokens are minted under it." },
+    "plus_addressing": { "type": "boolean", "default": true, "description": "Put the token in Reply-To as <local>+<token>@<domain>." },
+    "smtp_host": { "type": "string" },
+    "smtp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 465 },
+    "smtp_security": { "type": "string", "enum": ["ssl", "starttls"], "default": "ssl" },
+    "smtp_username": { "type": "string", "description": "SMTP login; defaults to address." },
+    "imap_host": { "type": "string" },
+    "imap_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 993 },
+    "imap_security": { "type": "string", "enum": ["ssl", "starttls"], "default": "ssl" },
+    "imap_username": { "type": "string", "description": "IMAP login; defaults to address." },
+    "imap_folder": { "type": "string", "default": "INBOX" },
+    "processed_folder": { "type": "string", "default": "Orbit/Processed" },
+    "max_messages": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Mails one poll handles at most." },
+    "from_name": { "type": "string", "default": "Orbit" },
+    "dashboard_url": { "type": "string", "default": "", "description": "Link closing each mail; {task_id} and {request_id} are filled in." }
+  },
+  "additionalProperties": false
+}

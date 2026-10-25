@@ -1,0 +1,17 @@
+# The deterministic step behind decision_mail_poll_pipeline: one decision-mail.poll call,
+# no model. Core judges and applies every answer it submits.
+schemaVersion: 2
+kind: Activity
+metadata:
+  name: decision_mail_poll
+spec:
+  type: deterministic
+  description: >-
+    Read replies in the channel mailbox, authenticate them and submit each answer to
+    orbit.decision.submit through decision-mail.poll.
+  input_schema_json:
+    type: object
+  action: plugin.tool_call
+  config:
+    tool: decision-mail.poll
+    input: {}

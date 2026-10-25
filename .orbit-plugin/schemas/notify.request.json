@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.notify request",
+  "type": "object",
+  "properties": {
+    "request_ids": {
+      "type": "array",
+      "description": "Mail only these open requests. Absent, every open request not yet mailed.",
+      "items": { "type": "string", "pattern": "^dr-[0-9a-f]{16}$" },
+      "maxItems": 50
+    },
+    "resend": {
+      "type": "boolean",
+      "description": "Mail the selected requests again even when they were mailed before."
+    }
+  },
+  "additionalProperties": false
+}

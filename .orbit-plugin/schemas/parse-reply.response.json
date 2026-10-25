@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.parse-reply response",
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["answer", "unparseable", "not_allowed"],
+      "description": "`answer` when the first line names one allowed answer."
+    },
+    "answer_id": { "type": ["string", "null"], "description": "The chosen answer id." },
+    "note": { "type": "string", "description": "The unquoted lines after the answer line." },
+    "reason": { "type": "string", "description": "Why the reply is refused; empty for an answer." }
+  },
+  "required": ["outcome", "answer_id", "note", "reason"],
+  "additionalProperties": false
+}

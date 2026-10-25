@@ -1,0 +1,13 @@
+# The job the `decision_requested` state trigger requires by name. A run succeeds only
+# when every open request's mail was sent, so a member settles as notified only then.
+schemaVersion: 2
+kind: Job
+metadata:
+  name: decision_request_pipeline
+spec:
+  state: enabled
+  kind: workflow
+  max_active_runs: 1
+  steps:
+    - id: notify
+      target: activity:decision_mail_notify

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.notify response",
+  "type": "object",
+  "properties": {
+    "sent": {
+      "type": "array",
+      "description": "Requests mailed by this call.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "gate": { "type": ["string", "null"] }
+        },
+        "required": ["request_id", "task_id", "gate"],
+        "additionalProperties": false
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Requests not mailed, with why.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "reason": { "type": "string", "enum": ["already_notified", "not_open"] }
+        },
+        "required": ["request_id", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["sent", "skipped"],
+  "additionalProperties": false
+}

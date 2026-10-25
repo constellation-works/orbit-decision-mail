@@ -1,0 +1,15 @@
+# Seeded disabled into the workspace's .orbit/routines as decision-mail-poll. A human
+# enables it after the mailbox config, the secrets and the channel registration are set.
+schemaVersion: 1
+name: poll
+description: >-
+  Every 5 minutes, read replies in the channel mailbox and submit authenticated answers
+  to orbit.decision.submit. Deterministic: no model.
+enabled: false
+trigger:
+  cron: "*/5 * * * *"
+  missed_run: skip
+target: job:decision_mail_poll_pipeline
+policy:
+  timeout_minutes: 5
+  overlap: forbid

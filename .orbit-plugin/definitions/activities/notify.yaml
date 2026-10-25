@@ -1,0 +1,17 @@
+# The deterministic step behind decision_request_pipeline: one decision-mail.notify call,
+# no model. It mails each open decision request not mailed yet; it applies nothing.
+schemaVersion: 2
+kind: Activity
+metadata:
+  name: decision_mail_notify
+spec:
+  type: deterministic
+  description: >-
+    Mail every open decision request that has not been mailed yet through
+    decision-mail.notify.
+  input_schema_json:
+    type: object
+  action: plugin.tool_call
+  config:
+    tool: decision-mail.notify
+    input: {}

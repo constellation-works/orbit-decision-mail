@@ -1,22 +1,155 @@
 schemaVersion: 1
 kind: PluginTest
 tests:
-  # `orbit plugin test` never opens the secret store, so every declared secret
-  # reads as unset here.
+  # `orbit plugin test` never opens the secret store or the operator's config, so every
+  # declared secret reads unset unless a case supplies a fixture, and no config key is
+  # set. Nothing here reaches a mail server or calls back into Orbit.
   - name: status_with_no_secrets_set
     tool: status
     input: {}
     expect:
       output:
         version: 0.1.0
-        transport: not_implemented
+        transport: not_configured
         secrets:
           smtp_password: unset
           imap_password: unset
           channel_key: unset
+        missing:
+          - address
+          - notify_to
+          - allowed_senders
+          - authserv_id
+          - smtp_host
+          - imap_host
+          - smtp_password
+          - imap_password
+          - channel_key
+        channel: email
+        key_epoch: 1
+        activity:
+          last_notify: null
+          last_poll: null
+          last_error: null
+          notified_requests: 0
+          recent_drops: []
+  - name: status_names_fixture_secrets_without_values
+    tool: status
+    input: {}
+    secrets:
+      channel_key: 00112233445566778899aabbccddeeff
+    expect:
+      output:
+        version: 0.1.0
+        transport: not_configured
+        secrets:
+          smtp_password: unset
+          imap_password: unset
+          channel_key: set
+        missing:
+          - address
+          - notify_to
+          - allowed_senders
+          - authserv_id
+          - smtp_host
+          - imap_host
+          - smtp_password
+          - imap_password
+        channel: email
+        key_epoch: 1
+        activity:
+          last_notify: null
+          last_poll: null
+          last_error: null
+          notified_requests: 0
+          recent_drops: []
   - name: status_refuses_unknown_input
     tool: status
     input: {"verbose": true}
+    expect:
+      error:
+        code: invalid_argument
+  - name: notify_refuses_until_configured
+    tool: notify
+    input: {}
+    expect:
+      error:
+        code: not_configured
+  - name: poll_refuses_until_configured
+    tool: poll
+    input: {}
+    expect:
+      error:
+        code: not_configured
+  - name: parse_reply_takes_the_number_and_keeps_the_note
+    tool: parse-reply
+    input:
+      text: "2\nKeep the API; the retirement was premature.\n\nOn Sat, Orbit wrote:\n> orbit-token: AAAAAAAAAAAAAAAAAAAAAAAAAA\n> 1. Drop criterion 2"
+      answers: ["1", "2", "dismiss"]
+    expect:
+      output:
+        outcome: answer
+        answer_id: "2"
+        note: Keep the API; the retirement was premature.
+        reason: ""
+  - name: parse_reply_matches_words_loosely
+    tool: parse-reply
+    input:
+      text: "Approve Anyway\n"
+      answers: ["approve_anyway", "clear", "evaluated"]
+    expect:
+      output:
+        outcome: answer
+        answer_id: approve_anyway
+        note: ""
+        reason: ""
+  - name: parse_reply_ignores_quoted_history_and_signature
+    tool: parse-reply
+    input:
+      text: "> 1. Approve\n\ndismiss\n-- \nDaniel"
+      answers: ["1", "dismiss"]
+    expect:
+      output:
+        outcome: answer
+        answer_id: dismiss
+        note: ""
+        reason: ""
+  - name: parse_reply_refuses_several_answers_in_a_single_request_mail
+    tool: parse-reply
+    input:
+      text: "reject 2,5"
+      answers: ["approve", "reject"]
+    expect:
+      output:
+        outcome: unparseable
+        answer_id: null
+        note: ""
+        reason: a single-request mail takes exactly one answer
+  - name: parse_reply_refuses_a_number_that_was_not_printed
+    tool: parse-reply
+    input:
+      text: "7"
+      answers: ["1", "2", "dismiss"]
+    expect:
+      output:
+        outcome: not_allowed
+        answer_id: null
+        note: ""
+        reason: "`7` is not one of the numbered answers"
+  - name: parse_reply_refuses_free_text
+    tool: parse-reply
+    input:
+      text: "please rescope it"
+      answers: ["approve_anyway", "clear"]
+    expect:
+      output:
+        outcome: unparseable
+        answer_id: null
+        note: ""
+        reason: the first line is not a number or an answer word
+  - name: parse_reply_refuses_unknown_input
+    tool: parse-reply
+    input: {"text": "1", "answers": ["1"], "token": "AAAA"}
     expect:
       error:
         code: invalid_argument

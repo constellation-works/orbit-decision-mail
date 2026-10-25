@@ -1,0 +1,28 @@
+# Seeded disabled into the workspace's .orbit/routines as decision-mail-notify. Before
+# enabling it, set trigger.state.owner_machine to this host's id (`orbit host list`) and
+# trigger.state.branch to the workspace's base branch.
+schemaVersion: 1
+name: notify
+description: >-
+  Mail each open decision request once, as it is raised. Before enabling, set
+  trigger.state.owner_machine (orbit host list) and trigger.state.branch (the base
+  branch). Deterministic: no model.
+enabled: false
+trigger:
+  state:
+    kind: decision_requested
+    owner_machine: set-owner-machine-before-enabling
+    branch: main
+    debounce_minutes: 1
+    max_wait_minutes: 5
+    max_items: 50
+    batch_size: 10
+    retries: 3
+    deadline_minutes: 240
+target: job:decision_request_pipeline
+policy:
+  timeout_minutes: 10
+  overlap: forbid
+  retries:
+    max: 3
+    backoff_minutes: 5

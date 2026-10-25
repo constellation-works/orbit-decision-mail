@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.poll response",
+  "type": "object",
+  "properties": {
+    "messages": {
+      "type": "array",
+      "description": "One entry per mail handled, in arrival order. Never a token or a body.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "string" },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "applied_earlier",
+              "refused",
+              "refused_unparseable",
+              "refused_not_allowed",
+              "dropped"
+            ]
+          },
+          "request_id": { "type": "string" },
+          "sender": { "type": "string" },
+          "answer": { "type": "string" },
+          "refusal": { "type": "string", "description": "Core's refusal code." },
+          "reason": { "type": "string", "description": "Why a mail was dropped." },
+          "mail": {
+            "type": "string",
+            "enum": ["sent", "failed", "rate_limited", "loop_guard"],
+            "description": "What happened to the confirmation or refusal mail."
+          }
+        },
+        "required": ["uid", "outcome"],
+        "additionalProperties": false
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "applied": { "type": "integer", "minimum": 0 },
+        "refused": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["applied", "refused", "dropped"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["messages", "counts"],
+  "additionalProperties": false
+}

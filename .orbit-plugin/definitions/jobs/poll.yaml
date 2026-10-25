@@ -1,0 +1,12 @@
+# The job the decision-mail-poll routine fires: one deterministic step.
+schemaVersion: 2
+kind: Job
+metadata:
+  name: decision_mail_poll_pipeline
+spec:
+  state: enabled
+  kind: workflow
+  max_active_runs: 1
+  steps:
+    - id: poll
+      target: activity:decision_mail_poll

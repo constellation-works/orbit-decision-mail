@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.parse-reply request",
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string",
+      "maxLength": 20000,
+      "description": "The reply's plain text, quoted history and signature included."
+    },
+    "answers": {
+      "type": "array",
+      "description": "The answer ids in the order the mail printed them; a reply's number indexes this list.",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "maxItems": 20
+    }
+  },
+  "required": ["text", "answers"],
+  "additionalProperties": false
+}

@@ -6,8 +6,8 @@
     "version": { "type": "string", "description": "The plugin version answering the call." },
     "transport": {
       "type": "string",
-      "enum": ["not_implemented"],
-      "description": "Mail transport state. `not_implemented` until decision channel slice 5 lands."
+      "enum": ["ready", "not_configured"],
+      "description": "`ready` when every required config key and secret is set and the config is valid; otherwise `not_configured`."
     },
     "secrets": {
       "type": "object",
@@ -19,9 +19,40 @@
       },
       "required": ["smtp_password", "imap_password", "channel_key"],
       "additionalProperties": false
+    },
+    "missing": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Names of required config keys and secrets that are not set."
+    },
+    "config_error": {
+      "type": "string",
+      "description": "Why the config is invalid, naming the key; present only when it is."
+    },
+    "channel": { "type": "string", "description": "The decision channel name submissions use." },
+    "key_epoch": {
+      "description": "The configured channel key epoch tokens are minted under.",
+      "type": ["integer", "null"]
+    },
+    "activity": {
+      "type": "object",
+      "description": "Recent activity from plugin state.",
+      "properties": {
+        "last_notify": { "type": ["object", "null"] },
+        "last_poll": { "type": ["object", "null"] },
+        "last_error": { "type": ["object", "null"] },
+        "notified_requests": { "type": "integer", "minimum": 0 },
+        "recent_drops": {
+          "type": "array",
+          "description": "The latest dropped mails: sender, reason and the provider's verdicts.",
+          "items": { "type": "object" }
+        }
+      },
+      "required": ["last_notify", "last_poll", "last_error", "notified_requests", "recent_drops"],
+      "additionalProperties": false
     }
   },
-  "required": ["version", "transport", "secrets"],
+  "required": ["version", "transport", "secrets", "missing", "channel", "key_epoch", "activity"],
   "additionalProperties": false,
   "$defs": {
     "presence": { "type": "string", "enum": ["set", "unset"] }
