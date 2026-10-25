@@ -1,9 +1,15 @@
 """The plugin's own bookkeeping under plugin state: which requests were mailed, refusal-mail
-rate limits, the unparseable-reply loop guard, recent drops and the last transport error.
+rate limits, the unparseable-reply loop guard, recent drops, transport errors and a bounded
+record of drops, refusals and suppressions.
 
-It holds no secret and no token. `notify` and `poll` hold `run.lock` for their whole call,
-so two calls never interleave their read-modify-write; the file is replaced atomically and
-created owner-only. A state file written by a newer plugin is never overwritten.
+It holds no secret, no token, no message body and no header dump. An event keeps the sender
+address, the reason, the request id and the time. `notify` and `poll` hold `run.lock` for
+their whole call, so two calls never interleave their read-modify-write; the file is replaced
+atomically and created owner-only. A state file written by a newer plugin is never overwritten.
+
+Counters are cumulative for the life of the state file. The event list keeps the newest
+`MAX_EVENTS` (20); an older event is evicted first. Schema 1 files still load. The next save
+stamps schema 2, which this shape belongs to.
 """
 
 from __future__ import annotations
@@ -12,18 +18,25 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_FILE = "state.json"
 LOCK_FILE = "run.lock"
 LOCK_DEADLINE_SECONDS = 20.0
 MAX_DROPS = 20
+# Newest events kept. Documented in README.md and docs/runbook.md; tests import this name.
+MAX_EVENTS = 20
 RETAIN = timedelta(days=14)
+_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_REQUEST_ID = re.compile(r"^dr-[0-9a-f]{16}$")
+_KINDS = frozenset({"drop", "refusal", "transport", "loop_guard"})
+_TRANSPORT = frozenset({"smtp", "imap"})
 
 
 class StateError(Exception):
@@ -35,6 +48,15 @@ class StateError(Exception):
         self.message = message
 
 
+def empty_counters() -> dict[str, Any]:
+    return {
+        "drops": {},
+        "refusals": {},
+        "transport": {"smtp": 0, "imap": 0},
+        "loop_guard": 0,
+    }
+
+
 def empty() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -42,6 +64,8 @@ def empty() -> dict[str, Any]:
         "refusal_mail": {},
         "parse_refusals": {},
         "drops": [],
+        "counters": empty_counters(),
+        "events": [],
         "last_notify": None,
         "last_poll": None,
         "last_error": None,
@@ -105,9 +129,11 @@ class StateStore:
                 value, type(default) if default is not None else dict
             ):
                 state[key] = value
+        normalize(state)
         return state
 
     def save(self, state: dict[str, Any], now: datetime) -> None:
+        normalize(state)
         _prune(state, now)
         self._ensure_dir()
         target = self.directory / STATE_FILE
@@ -139,6 +165,144 @@ def record_drop(state: dict[str, Any], entry: dict[str, Any]) -> None:
     drops: list[Any] = state["drops"]
     drops.append(entry)
     del drops[:-MAX_DROPS]
+
+
+def record_event(
+    state: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    at: str,
+    sender: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Count one outcome and append its event, evicting the oldest past `MAX_EVENTS`.
+
+    `reason` is a plugin code (`sender_not_allowed`, `token_consumed`, `smtp`, `loop_guard`),
+    never a message, a header or a server's text. An unrecognised reason counts as `other`.
+    """
+    normalize(state)
+    if kind not in _KINDS:
+        return
+    if _REASON.fullmatch(reason) is None:
+        reason = "other"
+    if kind == "transport" and reason not in _TRANSPORT:
+        return
+    if kind == "loop_guard":
+        reason = "loop_guard"
+    counters: dict[str, Any] = state["counters"]
+    if kind == "drop":
+        _bump(counters["drops"], reason)
+    elif kind == "refusal":
+        _bump(counters["refusals"], reason)
+    elif kind == "transport":
+        transport: dict[str, int] = counters["transport"]
+        transport[reason] = transport[reason] + 1
+    else:
+        counters["loop_guard"] = counters["loop_guard"] + 1
+    events: list[Any] = state["events"]
+    events.append(
+        {
+            "at": at,
+            "kind": kind,
+            "reason": reason,
+            "sender": _sender(sender),
+            "request_id": _request_id(request_id),
+        }
+    )
+    del events[:-MAX_EVENTS]
+
+
+def report(state: dict[str, Any]) -> dict[str, Any]:
+    """The counters, the retained events and the documented bound. No other state."""
+    normalize(state)
+    counters: dict[str, Any] = state["counters"]
+    transport: dict[str, int] = counters["transport"]
+    events: list[Any] = state["events"]
+    return {
+        "bound": MAX_EVENTS,
+        "counters": {
+            "drops": dict(counters["drops"]),
+            "refusals": dict(counters["refusals"]),
+            "transport": {"smtp": transport["smtp"], "imap": transport["imap"]},
+            "loop_guard": counters["loop_guard"],
+        },
+        "events": [dict(event) for event in events],
+    }
+
+
+def normalize(state: dict[str, Any]) -> None:
+    """Fill counters and events the shape this plugin writes, and stamp the schema version."""
+    raw = state.get("counters")
+    raw = raw if isinstance(raw, dict) else {}
+    transport = raw.get("transport")
+    transport = transport if isinstance(transport, dict) else {}
+    loop_guard = raw.get("loop_guard")
+    state["counters"] = {
+        "drops": _count_map(raw.get("drops")),
+        "refusals": _count_map(raw.get("refusals")),
+        "transport": {"smtp": _count(transport.get("smtp")), "imap": _count(transport.get("imap"))},
+        "loop_guard": _count(loop_guard),
+    }
+    events = state.get("events")
+    kept = [event for event in events if _event_ok(event)] if isinstance(events, list) else []
+    state["events"] = kept[-MAX_EVENTS:]
+    state["schema_version"] = SCHEMA_VERSION
+
+
+def _bump(table: dict[str, int], key: str) -> None:
+    table[key] = table.get(key, 0) + 1
+
+
+def _count_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, int] = {}
+    for key, count in value.items():
+        if isinstance(key, str) and _REASON.fullmatch(key) is not None and _count_ok(count):
+            cleaned[key] = count
+    return cleaned
+
+
+def _count_ok(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _count(value: Any) -> int:
+    return value if _count_ok(value) else 0
+
+
+def _request_id(value: str | None) -> str | None:
+    if isinstance(value, str) and _REQUEST_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _sender(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = "".join(char for char in " ".join(value.split()) if char.isprintable())
+    if not text:
+        return None
+    return text if len(text) <= 120 else text[:119] + "…"
+
+
+def _event_ok(value: Any) -> bool:
+    fields = {"at", "kind", "reason", "sender", "request_id"}
+    if not isinstance(value, dict) or set(value) != fields:
+        return False
+    kind = value.get("kind")
+    reason = value.get("reason")
+    sender = value.get("sender")
+    request_id = value.get("request_id")
+    return (
+        kind in _KINDS
+        and isinstance(value.get("at"), str)
+        and isinstance(reason, str)
+        and _REASON.fullmatch(reason) is not None
+        and (sender is None or isinstance(sender, str))
+        and (request_id is None or isinstance(request_id, str))
+    )
 
 
 def _prune(state: dict[str, Any], now: datetime) -> None:

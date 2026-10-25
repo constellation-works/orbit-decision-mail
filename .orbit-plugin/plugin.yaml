@@ -27,7 +27,8 @@ spec:
   permissions:
     fs:
       # The interpreter uv provides, its cache and bytecode, and the plugin's own
-      # bookkeeping (which requests were mailed, refusal rate limits) live in plugin state.
+      # bookkeeping (which requests were mailed, refusal rate limits, drop and
+      # refusal counters) lives in plugin state.
       write: ["{{plugin_state}}"]
     # SMTP and IMAP to the channel mailbox; also the first call's interpreter fetch.
     network: any
@@ -58,11 +59,24 @@ spec:
         Report the plugin version, whether the mail transport is configured (`ready`) or
         which config keys and secrets are missing (names only; never a value), and recent
         activity from plugin state: the last notify and poll, the last transport error and
-        the latest dropped (unauthenticated) mails. Contacts no server and writes nothing.
+        the latest dropped (unauthenticated) mails, cumulative counters and the newest 20
+        events (drops, core refusals, SMTP/IMAP errors, loop-guard suppressions). An event
+        keeps the sender, the reason, the request id and the time: no body, token or header.
+        Contacts no server and writes nothing.
       execution_kind: read_only
       mcp_scope: workspace
       input_schema: { $ref: schemas/status.request.json }
       output_schema: { $ref: schemas/status.response.json }
+    - name: activity
+      description: >-
+        Report the drop, refusal, transport and loop-guard counters and the newest 20 events
+        from plugin state. Each event keeps the sender address, the reason, the request id
+        and the time, and never a body, a token, a secret or a header. The same figures are
+        on `status`. Contacts no server and writes nothing.
+      execution_kind: read_only
+      mcp_scope: workspace
+      input_schema: { $ref: schemas/activity.request.json }
+      output_schema: { $ref: schemas/activity.response.json }
     - name: notify
       description: >-
         Mail every open decision request that has not been mailed yet (or only
@@ -110,6 +124,12 @@ spec:
       - id: status
         title: Decision mail
         source: tool:status
+        render: json
+        group: operations
+        refresh_ms: 60000
+      - id: activity
+        title: Drops and refusals
+        source: tool:activity
         render: json
         group: operations
         refresh_ms: 60000

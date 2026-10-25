@@ -120,6 +120,7 @@ def _unexpected_exception(rig: Rig) -> None:
 
 SCENARIOS: dict[str, tuple[str, Callable[[Rig], None]]] = {
     "status": ("status", lambda rig: None),
+    "activity": ("activity", lambda rig: None),
     "parse-reply": ("parse-reply", lambda rig: None),
     "notify": ("notify", lambda rig: None),
     "notify_smtp_error": ("notify", _smtp_quotes_password),
@@ -174,6 +175,7 @@ def test_the_injected_errors_really_carry_the_sentinels(
     ("tool", "tool_input", "code"),
     [
         ("status", {}, None),
+        ("activity", {}, None),
         ("parse-reply", {"text": "2", "answers": ["a", "b"]}, None),
         ("notify", {}, "orbit_callback_failed"),
         ("poll", {}, "not_configured"),

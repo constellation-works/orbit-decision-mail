@@ -13,7 +13,8 @@ the plugin is only a transport.
 
 The design is Orbit's
 [`docs/design/human-decision-channel/2_design.md`](https://github.com/constellation-works/orbit/blob/agent-main/docs/design/human-decision-channel/2_design.md);
-§10 lists the slices.
+§10 lists the slices. Operators follow [docs/runbook.md](docs/runbook.md) from the mailbox
+through registration, key rotation, revocation and outage recovery.
 
 ## Layout
 
@@ -42,13 +43,20 @@ orbit plugin test "$out" --grant fs,network
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `decision-mail.status` | read-only | Version, `ready`/`not_configured`, missing config keys and secrets (names only), the configured channel and key epoch, and recent activity from plugin state (last notify, last poll, last error, recent drops). Contacts no server. |
+| `decision-mail.status` | read-only | Version, `ready`/`not_configured`, missing config keys and secrets (names only), the configured channel and key epoch, and recent activity from plugin state (last notify, last poll, last error, recent drops, cumulative counters and the newest 20 events). Contacts no server. |
+| `decision-mail.activity` | read-only | The same counters and newest 20 events, and nothing else. This is what the dashboard panel "Drops and refusals" renders. Contacts no server and writes nothing. |
 | `decision-mail.notify` | mutating | Lists open decision requests (`orbit.decision.list`) and mails each one not mailed yet: subject `[orbit] decision needed: <title> (<task>) [<request>]`, `Reply-To: <local>+<token>@<domain>`, `orbit-token:`/`orbit-request:` lines, the numbered answers and the dashboard link. Input `request_ids` limits it to some requests, `resend: true` mails them again. A send failure fails the call (retryable). |
 | `decision-mail.poll` | mutating | Reads unseen mail (oldest first, at most `max_messages`), authenticates it and submits each answer to `orbit.decision.submit`, then sends a confirmation or a refusal and files the mail. |
 | `decision-mail.parse-reply` | read-only | Applies the reply grammar to `text` against the printed `answers`; reads and sends nothing. |
 
 No tool takes or returns a password, the channel key or a token. Every response and log
 line is scrubbed of the delivered secret values as a last line of defence.
+
+Counters accumulate for the life of the state file: drops by reason, core refusals by code,
+SMTP and IMAP transport errors, and loop-guard suppressions. The newest 20 events sit beside
+them. An event keeps the sender address, the reason, the request id and the time. It does not
+keep a body, a token, a secret or a header. A 21st event evicts the oldest. `status` and
+`activity` both report the figures; the runbook says where an operator looks.
 
 ### How poll treats a reply
 

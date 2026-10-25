@@ -33,6 +33,15 @@ tests:
           last_error: null
           notified_requests: 0
           recent_drops: []
+          bound: 20
+          counters:
+            drops: {}
+            refusals: {}
+            transport:
+              smtp: 0
+              imap: 0
+            loop_guard: 0
+          events: []
   - name: status_names_fixture_secrets_without_values
     tool: status
     input: {}
@@ -63,6 +72,35 @@ tests:
           last_error: null
           notified_requests: 0
           recent_drops: []
+          bound: 20
+          counters:
+            drops: {}
+            refusals: {}
+            transport:
+              smtp: 0
+              imap: 0
+            loop_guard: 0
+          events: []
+  - name: activity_with_no_state
+    tool: activity
+    input: {}
+    expect:
+      output:
+        bound: 20
+        counters:
+          drops: {}
+          refusals: {}
+          transport:
+            smtp: 0
+            imap: 0
+          loop_guard: 0
+        events: []
+  - name: activity_refuses_unknown_input
+    tool: activity
+    input: {"verbose": true}
+    expect:
+      error:
+        code: invalid_argument
   - name: status_refuses_unknown_input
     tool: status
     input: {"verbose": true}

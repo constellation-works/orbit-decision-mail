@@ -32,7 +32,7 @@ from decision_mail.config import (
 )
 from decision_mail.errors import ToolError
 from decision_mail.orbit_api import CallbackError, CoreRefusal, OrbitApi, OrbitCli
-from decision_mail.state import StateError, StateStore, record_drop
+from decision_mail.state import StateError, StateStore, empty, record_drop, record_event, report
 from decision_mail.tokens import TokenError, fingerprint, mint, unix_seconds
 from decision_mail.transport import (
     ImapFactory,
@@ -44,7 +44,16 @@ from decision_mail.transport import (
     connect_smtp,
 )
 
-__all__ = ["SECRET_NAMES", "Deps", "default_deps", "notify", "parse_reply", "poll", "status"]
+__all__ = [
+    "SECRET_NAMES",
+    "Deps",
+    "activity",
+    "default_deps",
+    "notify",
+    "parse_reply",
+    "poll",
+    "status",
+]
 
 REQUEST_ID = re.compile(r"dr-[0-9a-f]{16}")
 REFUSAL_MAIL_INTERVAL = timedelta(hours=1)
@@ -115,25 +124,46 @@ def status(_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> dict[
 
 
 def _activity(deps: Deps) -> dict[str, Any]:
-    activity: dict[str, Any] = {
+    blank = report(empty())
+    snapshot: dict[str, Any] = {
         "last_notify": None,
         "last_poll": None,
         "last_error": None,
         "notified_requests": 0,
         "recent_drops": [],
+        "counters": blank["counters"],
+        "events": blank["events"],
+        "bound": blank["bound"],
     }
     if deps.state_dir is None:
-        return activity
+        return snapshot
     try:
         state = StateStore(deps.state_dir).load()
     except StateError as error:
-        activity["last_error"] = {"tool": "status", "code": error.code, "message": error.message}
-        return activity
+        snapshot["last_error"] = {"tool": "status", "code": error.code, "message": error.message}
+        return snapshot
     for key in ("last_notify", "last_poll", "last_error"):
-        activity[key] = state[key]
-    activity["notified_requests"] = len(state["notified"])
-    activity["recent_drops"] = state["drops"]
-    return activity
+        snapshot[key] = state[key]
+    snapshot["notified_requests"] = len(state["notified"])
+    snapshot["recent_drops"] = state["drops"]
+    observed = report(state)
+    snapshot["counters"] = observed["counters"]
+    snapshot["events"] = observed["events"]
+    snapshot["bound"] = observed["bound"]
+    return snapshot
+
+
+def activity(_input: dict[str, Any], _context: dict[str, Any], deps: Deps) -> dict[str, Any]:
+    """Counters and recent events. Reads plugin state and nothing else; writes nothing."""
+    if deps.state_dir is None:
+        return report(empty())
+    try:
+        state = StateStore(deps.state_dir).load()
+    except StateError as error:
+        output = report(empty())
+        output["error"] = {"code": error.code, "message": error.message}
+        return output
+    return report(state)
 
 
 # --- notify -------------------------------------------------------------------------------
@@ -183,6 +213,13 @@ def notify(tool_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> d
                 except TransportError as error:
                     state["last_error"] = _error_record(now, "notify", "smtp_failed", str(error))
                     state["last_notify"] = _run_record(now, sent=len(sent), failed=request_id)
+                    _observe(
+                        state,
+                        kind="transport",
+                        reason="smtp",
+                        at=now.isoformat(),
+                        request_id=request_id,
+                    )
                     _save(store, state, now)
                     raise ToolError(
                         "smtp_failed",
@@ -264,6 +301,7 @@ def poll(_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> dict[st
         except TransportError as error:
             state["last_error"] = _error_record(now, "poll", "imap_failed", str(error))
             state["last_poll"] = _run_record(now, **_counts(results), halted=True)
+            _observe(state, kind="transport", reason="imap", at=now.isoformat())
             _save(store, state, now)
             raise ToolError("imap_failed", str(error), retryable=True) from None
         counts = _counts(results)
@@ -366,6 +404,8 @@ def _applied(
             answer_id,
             str(task_status) if task_status else None,
         ),
+        sender=sender,
+        request_id=request_id,
     )
     _file(run, uid)
     outcome = "applied_earlier" if recovered else "applied"
@@ -382,8 +422,16 @@ def _core_refusal(
 ) -> dict[str, Any]:
     request_id = str(request.get("id", ""))
     code = refusal.code
+    _observe(
+        run.state,
+        kind="refusal",
+        reason=code,
+        at=run.now.isoformat(),
+        sender=sender,
+        request_id=request_id,
+    )
     if code in SILENT_REFUSALS:
-        return _drop(run, uid, sender, code, message)
+        return _drop(run, uid, sender, code, message, counted=False)
     if code not in MAILED_REFUSALS:
         raise _Halt(
             ToolError(
@@ -410,6 +458,14 @@ def _parse_refusal(run: _Poll, sender: str, request: dict[str, Any], reason: str
     count = int(entry.get("count", 0)) + 1
     run.state["parse_refusals"][request_id] = {"count": count, "at": run.now.isoformat()}
     if count > PARSE_REFUSAL_MAILS:
+        _observe(
+            run.state,
+            kind="loop_guard",
+            reason="loop_guard",
+            at=run.now.isoformat(),
+            sender=sender,
+            request_id=request_id,
+        )
         return "loop_guard"
     return _rate_limited_refusal(run, request, sender, "answer_not_allowed", reason)
 
@@ -426,7 +482,12 @@ def _rate_limited_refusal(
             then = None
         if then is not None and run.now - then < REFUSAL_MAIL_INTERVAL:
             return "rate_limited"
-    mail = _send(run, render.refusal_mail(run.config, to, request, code, detail))
+    mail = _send(
+        run,
+        render.refusal_mail(run.config, to, request, code, detail),
+        sender=to,
+        request_id=request_id,
+    )
     if mail == "sent":
         run.state["refusal_mail"][request_id] = {"at": run.now.isoformat()}
     return mail
@@ -457,12 +518,23 @@ def _drop(
     sender: str | None,
     reason: str,
     message: inbound.Inbound | None,
+    *,
+    counted: bool = True,
 ) -> dict[str, Any]:
     """Leave the mail in the inbox, seen, with no reply and no core submission."""
     verdicts = message.verdicts.summary() if message is not None else {}
     shown = render.line(sender, 120) if sender else None
     record = {"at": run.now.isoformat(), "sender": shown, "reason": reason, **verdicts}
     record_drop(run.state, record)
+    if counted:
+        _observe(
+            run.state,
+            kind="drop",
+            reason=reason,
+            at=run.now.isoformat(),
+            sender=sender,
+            request_id=_one_request_id(message),
+        )
     _log({"event": "dropped", "uid": uid, **record})
     run.mailbox.mark_seen(uid)
     return _result(uid, "dropped", None, shown, reason=reason)
@@ -473,11 +545,21 @@ def _file(run: _Poll, uid: str) -> None:
     run.mailbox.file_processed(uid)
 
 
-def _send(run: _Poll, message: Any) -> str:
+def _send(
+    run: _Poll, message: Any, *, sender: str | None = None, request_id: str | None = None
+) -> str:
     try:
         run.outbox.send(message)
     except TransportError as error:
         run.mail_failures += 1
+        _observe(
+            run.state,
+            kind="transport",
+            reason="smtp",
+            at=run.now.isoformat(),
+            sender=sender,
+            request_id=request_id,
+        )
         _log({"event": "reply_mail_failed", "error": str(error)})
         return "failed"
     return "sent"
@@ -647,6 +729,36 @@ def _error_record(now: datetime, tool: str, code: str, message: str) -> dict[str
     """The last error as plugin state keeps it; a server's text is scrubbed before it lands."""
     text = redact.text(message)[:300]
     return {"at": now.isoformat(), "tool": tool, "code": code, "message": text}
+
+
+def _observe(
+    state: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    at: str,
+    sender: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Record one counter and one event. The sender is an address, never a body or a header."""
+    shown = redact.text(render.line(sender, 120)) if sender else None
+    record_event(
+        state,
+        kind=kind,
+        reason=reason,
+        at=at,
+        sender=shown or None,
+        request_id=request_id,
+    )
+
+
+def _one_request_id(message: inbound.Inbound | None) -> str | None:
+    if message is None:
+        return None
+    found = [item for item in message.request_ids if REQUEST_ID.fullmatch(item)]
+    if len(found) != 1:
+        return None
+    return found[0]
 
 
 def _log(fields: dict[str, Any]) -> None:

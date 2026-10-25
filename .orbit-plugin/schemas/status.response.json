@@ -46,15 +46,73 @@
           "type": "array",
           "description": "The latest dropped mails: sender, reason and the provider's verdicts.",
           "items": { "type": "object" }
+        },
+        "counters": { "$ref": "#/$defs/counters" },
+        "events": { "$ref": "#/$defs/events" },
+        "bound": {
+          "type": "integer",
+          "const": 20,
+          "description": "How many events are kept. Older events are evicted first."
         }
       },
-      "required": ["last_notify", "last_poll", "last_error", "notified_requests", "recent_drops"],
+      "required": [
+        "last_notify",
+        "last_poll",
+        "last_error",
+        "notified_requests",
+        "recent_drops",
+        "counters",
+        "events",
+        "bound"
+      ],
       "additionalProperties": false
     }
   },
   "required": ["version", "transport", "secrets", "missing", "channel", "key_epoch", "activity"],
   "additionalProperties": false,
   "$defs": {
-    "presence": { "type": "string", "enum": ["set", "unset"] }
+    "presence": { "type": "string", "enum": ["set", "unset"] },
+    "counters": {
+      "type": "object",
+      "description": "Cumulative counts for the life of the state file. Keys are plugin reason codes.",
+      "properties": {
+        "drops": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "refusals": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "transport": {
+          "type": "object",
+          "properties": {
+            "smtp": { "type": "integer", "minimum": 0 },
+            "imap": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["smtp", "imap"],
+          "additionalProperties": false
+        },
+        "loop_guard": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["drops", "refusals", "transport", "loop_guard"],
+      "additionalProperties": false
+    },
+    "events": {
+      "type": "array",
+      "description": "The newest events, oldest first within the bound. No body, token, secret or header.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "at": { "type": "string" },
+          "kind": { "type": "string", "enum": ["drop", "refusal", "transport", "loop_guard"] },
+          "reason": { "type": "string" },
+          "sender": { "type": ["string", "null"] },
+          "request_id": { "type": ["string", "null"] }
+        },
+        "required": ["at", "kind", "reason", "sender", "request_id"],
+        "additionalProperties": false
+      }
+    }
   }
 }

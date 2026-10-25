@@ -24,6 +24,7 @@ SOURCE = PLUGIN / "src" / "decision_mail"
 # What each tool may do: reading and judging are read-only, mailing or submitting mutates.
 EXECUTION_KIND = {
     "status": "read_only",
+    "activity": "read_only",
     "parse-reply": "read_only",
     "notify": "mutating",
     "poll": "mutating",
@@ -70,6 +71,20 @@ def test_each_tool_accepts_exactly_its_schema_properties() -> None:
         assert frozenset(request.get("properties", {})) == TOOLS[tool["name"]][0]
         jsonschema.Draft202012Validator.check_schema(request)
         jsonschema.Draft202012Validator.check_schema(schema(tool["output_schema"]["$ref"]))
+
+
+def test_the_activity_panel_reads_the_read_only_tool() -> None:
+    tools = {tool["name"]: tool for tool in manifest()["spec"]["tools"]}
+    panels = manifest()["spec"]["web"]["panels"]
+    activity = next(panel for panel in panels if panel["id"] == "activity")
+    assert activity["source"] == "tool:activity"
+    assert tools[activity["source"].removeprefix("tool:")]["execution_kind"] == "read_only"
+    assert activity["render"] == "json"
+    # Every panel source is one of this plugin's read-only tools.
+    for panel in panels:
+        verb = panel["source"].removeprefix("tool:")
+        assert panel["source"].startswith("tool:")
+        assert tools[verb]["execution_kind"] == "read_only"
 
 
 def test_execution_kinds_follow_what_each_tool_does() -> None:

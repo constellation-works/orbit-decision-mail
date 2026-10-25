@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.activity response",
+  "type": "object",
+  "properties": {
+    "bound": {
+      "type": "integer",
+      "const": 20,
+      "description": "How many events are kept. The oldest event past this bound is evicted first."
+    },
+    "counters": { "$ref": "#/$defs/counters" },
+    "events": { "$ref": "#/$defs/events" },
+    "error": {
+      "type": "object",
+      "description": "Present only when plugin state could not be read. Never a secret.",
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["bound", "counters", "events"],
+  "additionalProperties": false,
+  "$defs": {
+    "counters": {
+      "type": "object",
+      "description": "Cumulative counts for the life of the state file. Keys are plugin reason codes.",
+      "properties": {
+        "drops": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "refusals": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "transport": {
+          "type": "object",
+          "properties": {
+            "smtp": { "type": "integer", "minimum": 0 },
+            "imap": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["smtp", "imap"],
+          "additionalProperties": false
+        },
+        "loop_guard": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["drops", "refusals", "transport", "loop_guard"],
+      "additionalProperties": false
+    },
+    "events": {
+      "type": "array",
+      "description": "The newest events, oldest first within the bound. No body, token, secret or header.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "at": { "type": "string" },
+          "kind": { "type": "string", "enum": ["drop", "refusal", "transport", "loop_guard"] },
+          "reason": { "type": "string" },
+          "sender": { "type": ["string", "null"] },
+          "request_id": { "type": ["string", "null"] }
+        },
+        "required": ["at", "kind", "reason", "sender", "request_id"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

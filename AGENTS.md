@@ -27,6 +27,8 @@
 README.md has the full tables; keep them and this summary in step with the manifest.
 
 - Tools: `status` (read-only: readiness, missing keys/secrets by name, activity),
+  `activity` (read-only: cumulative drop, refusal, SMTP/IMAP and loop-guard counters and
+  the newest 20 events; the dashboard panel "Drops and refusals" reads this tool),
   `notify` (mutating: mails each open request once), `poll` (mutating: authenticates
   replies, submits through `orbit.decision.submit`, mails a confirmation or refusal, files
   the mail), `parse-reply` (read-only: the reply grammar on a given text).
@@ -40,14 +42,18 @@ README.md has the full tables; keep them and this summary in step with the manif
 - The plugin cannot read the channel's key epoch, so `key_epoch` is config the operator
   copies from `orbit decision channel list` after `register` and every `rotate-key`.
 - Plugin state (`$ORBIT_PLUGIN_STATE/mail/state.json`, under an flock) records what was
-  mailed, refusal-mail times (one per request per hour), the unparseable-reply loop guard
-  and recent drops. It never holds a secret or a token.
-- Operator steps (Daniel): `orbit plugin add` a fresh export; `orbit plugin enable
+  mailed, refusal-mail times (one per request per hour), the unparseable-reply loop guard,
+  recent drops, and cumulative counters plus the newest 20 events (sender, reason, request
+  id and time; the 21st evicts the oldest). It never holds a secret, a token, a body or a
+  header dump. Schema 2 is stamped on the next save; a schema 1 file still loads.
+- Operator steps are `docs/runbook.md` (mailbox `Authentication-Results`, install and
+  grants, secrets, `orbit decision channel register email --human daniel --plugin
+  decision-mail --allow-sender <address>`, routines, `rotate-key`, revoke, SMTP/IMAP
+  recovery). In short: `orbit plugin add` a fresh export; `orbit plugin enable
   decision-mail --grant 'fs={{plugin_state}}' --grant network --grant orbit_tools`; `orbit
   plugin secret set decision-mail smtp_password|imap_password`; set the config keys with
   `orbit config set plugins.decision-mail.<key>`; `[decision_channel] enabled = true`;
-  `orbit decision channel register email --human daniel --plugin decision-mail
-  --allow-sender <address>` (mirrors `channel_key`); set `key_epoch`; set the
+  register the channel (mirrors `channel_key`); set `key_epoch`; set the
   `decision-mail-notify` routine's `owner_machine` and `branch`; enable both routines.
 
 <!-- constellation-standards:begin -->
