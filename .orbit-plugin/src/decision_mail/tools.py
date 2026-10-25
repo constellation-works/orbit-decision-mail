@@ -9,6 +9,7 @@ a task.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from decision_mail import __version__, grammar, inbound, redact, render
+from decision_mail import __version__, grammar, inbound, redact, render, schedule
 from decision_mail.config import (
     SECRET_NAMES,
     Config,
@@ -32,7 +33,15 @@ from decision_mail.config import (
 )
 from decision_mail.errors import ToolError
 from decision_mail.orbit_api import CallbackError, CoreRefusal, OrbitApi, OrbitCli
-from decision_mail.state import StateError, StateStore, empty, record_drop, record_event, report
+from decision_mail.state import (
+    StateError,
+    StateStore,
+    empty,
+    queue_confirmation,
+    record_drop,
+    record_event,
+    report,
+)
 from decision_mail.tokens import TokenError, fingerprint, mint, unix_seconds
 from decision_mail.transport import (
     ImapFactory,
@@ -49,6 +58,7 @@ __all__ = [
     "Deps",
     "activity",
     "default_deps",
+    "digest",
     "notify",
     "parse_reply",
     "poll",
@@ -56,6 +66,10 @@ __all__ = [
 ]
 
 REQUEST_ID = re.compile(r"dr-[0-9a-f]{16}")
+# Items one digest mail lists at most; the rest wait for the next digest.
+DIGEST_MAX_ITEMS = 50
+# Task fields the digest reads for its summary and pilot state.
+DIGEST_TASK_FIELDS = ["id", "title", "description", "status", "readiness", "pilot_warnings"]
 REFUSAL_MAIL_INTERVAL = timedelta(hours=1)
 # Unparseable (answer_not_allowed-class) replies to one request that still get a mail.
 PARSE_REFUSAL_MAILS = 3
@@ -128,7 +142,9 @@ def _activity(deps: Deps) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "last_notify": None,
         "last_poll": None,
+        "last_digest": None,
         "last_error": None,
+        "pending_confirmations": 0,
         "notified_requests": 0,
         "recent_drops": [],
         "counters": blank["counters"],
@@ -142,9 +158,10 @@ def _activity(deps: Deps) -> dict[str, Any]:
     except StateError as error:
         snapshot["last_error"] = {"tool": "status", "code": error.code, "message": error.message}
         return snapshot
-    for key in ("last_notify", "last_poll", "last_error"):
+    for key in ("last_notify", "last_poll", "last_digest", "last_error"):
         snapshot[key] = state[key]
     snapshot["notified_requests"] = len(state["notified"])
+    snapshot["pending_confirmations"] = len(state["pending_confirmations"])
     snapshot["recent_drops"] = state["drops"]
     observed = report(state)
     snapshot["counters"] = observed["counters"]
@@ -170,7 +187,12 @@ def activity(_input: dict[str, Any], _context: dict[str, Any], deps: Deps) -> di
 
 
 def notify(tool_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> dict[str, Any]:
-    """Mail every open decision request not yet mailed (or only `request_ids`)."""
+    """Mail the open decision requests the batching mode lets go out on their own.
+
+    `immediate` mails every request not yet mailed; `daily` only the `block_triage` ones (the
+    other gates wait for the digest); `off` none. A send inside the quiet hours fails
+    retryably, so the trigger keeps the request un-notified until the window ends.
+    """
     config = _config(context, ("smtp_password", "channel_key"))
     wanted = _request_ids(tool_input.get("request_ids"))
     resend = tool_input.get("resend", False) is True
@@ -191,23 +213,38 @@ def notify(tool_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> d
         if wanted is not None:
             found = {request.get("id") for request in requests}
             skipped += [{"request_id": rid, "reason": "not_open"} for rid in wanted - found]
+        due: list[dict[str, Any]] = []
+        for request in requests:
+            request_id = str(request.get("id", ""))
+            reason = _unsent_reason(config, request, state, now, resend)
+            if reason is None:
+                due.append(request)
+            else:
+                skipped.append({"request_id": request_id, "reason": reason})
+        until = schedule.deferred_until(config.quiet_hours, now)
+        if due and until is not None:
+            state["last_notify"] = _run_record(
+                now, sent=0, deferred=len(due), until=until.isoformat()
+            )
+            _save(store, state, now)
+            raise ToolError(
+                "quiet_hours",
+                f"{len(due)} request mail(s) wait for the quiet hours to end at "
+                f"{until.isoformat()}; nothing was sent",
+                retryable=True,
+                detail={"deferred": len(due), "until": until.isoformat()},
+            )
         with Outbox(config, smtp_password, deps.smtp) as outbox:
-            for request in requests:
+            for request in due:
                 request_id = str(request.get("id", ""))
                 task_id = str(request.get("task_id", ""))
-                if request.get("state") != "open":
-                    skipped.append({"request_id": request_id, "reason": "not_open"})
-                    continue
-                if request_id in state["notified"] and not resend:
-                    skipped.append({"request_id": request_id, "reason": "already_notified"})
-                    continue
                 expires_at = str(request.get("expires_at", ""))
                 try:
                     token = mint(key, request_id, task_id, config.key_epoch, expires_at)
                     expiry = datetime.fromtimestamp(unix_seconds(expires_at), UTC)
                 except TokenError as error:
                     raise ToolError("token_unmintable", str(error)) from None
-                message = render.request_mail(config, request, _task(deps, task_id), token)
+                message = render.request_mail(config, request, _task(deps, task_id), token, now=now)
                 try:
                     outbox.send(message)
                 except TransportError as error:
@@ -227,11 +264,7 @@ def notify(tool_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> d
                         retryable=True,
                         detail={"sent": len(sent), "failed_request": request_id},
                     ) from None
-                state["notified"][request_id] = {
-                    "at": now.isoformat(),
-                    "task_id": task_id,
-                    "expires_at": expiry.isoformat(),
-                }
+                _mark_notified(state, request_id, task_id, expiry, config.key_epoch, now)
                 _save(store, state, now)
                 sent.append(
                     {"request_id": request_id, "task_id": task_id, "gate": request.get("gate")}
@@ -241,12 +274,248 @@ def notify(tool_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> d
     return {"sent": sent, "skipped": skipped}
 
 
-def _task(deps: Deps, task_id: str) -> dict[str, Any]:
-    """The task's title and status for the mail; a failed read still mails the request."""
+def _unsent_reason(
+    config: Config, request: dict[str, Any], state: dict[str, Any], now: datetime, resend: bool
+) -> str | None:
+    """Why `notify` does not mail this request now, or None when it should."""
+    request_id = str(request.get("id", ""))
+    if request.get("state") != "open":
+        return "not_open"
+    if config.digest_mode == "off":
+        return "mode_off"
+    if not schedule.mails_individually(config.digest_mode, str(request.get("gate", ""))):
+        return "held_for_digest"
+    if request_id in state["notified"] and not resend:
+        return "already_notified"
+    if _expired(request, now):
+        return "expired"
+    return None
+
+
+def _expired(request: dict[str, Any], now: datetime) -> bool:
+    """Whether the request's token is already dead at `now`; an unreadable stamp is not."""
     try:
-        return _call(deps, "orbit.task.show", {"id": task_id})
+        return unix_seconds(str(request.get("expires_at", ""))) <= int(now.timestamp())
+    except TokenError:
+        return False
+
+
+def _mark_notified(
+    state: dict[str, Any],
+    request_id: str,
+    task_id: str,
+    expiry: datetime,
+    epoch: int,
+    now: datetime,
+) -> None:
+    state["notified"][request_id] = {
+        "at": now.isoformat(),
+        "task_id": task_id,
+        "expires_at": expiry.isoformat(),
+        "epoch": epoch,
+    }
+
+
+def _task(deps: Deps, task_id: str, fields: list[str] | None = None) -> dict[str, Any]:
+    """The task's title and status for the mail; a failed read still mails the request."""
+    payload: dict[str, Any] = {"id": task_id}
+    if fields:
+        payload["fields"] = fields
+    try:
+        return _call(deps, "orbit.task.show", payload)
     except ToolError:
         return {}
+
+
+# --- digest -------------------------------------------------------------------------------
+
+
+def digest(_input: dict[str, Any], context: dict[str, Any], deps: Deps) -> dict[str, Any]:
+    """Send one digest mail: proposed tasks, requests held for it, reminders, confirmations.
+
+    Core's `orbit.decision.digest` raises the missing approval requests and returns the
+    digest set, so every request raised here is timed from this send. Nothing to list (and no
+    confirmations owed) sends no mail.
+    """
+    config = _config(context, ("smtp_password", "channel_key"))
+    if config.digest_mode == "off":
+        return _digest_output(None, [], 0, 0, reason="mode_off")
+    store = _store(deps)
+    key = secret(context, "channel_key") or ""
+    now = deps.now()
+    until = schedule.deferred_until(config.quiet_hours, now)
+    if until is not None:
+        raise ToolError(
+            "quiet_hours",
+            f"the digest waits for the quiet hours to end at {until.isoformat()}; nothing was "
+            "raised or sent",
+            retryable=True,
+            detail={"until": until.isoformat()},
+        )
+    with _locked(store, "digest"):
+        state = _load(store)
+        core = _call(deps, "orbit.decision.digest", {"channel": config.channel})
+        listing = _call(deps, "orbit.decision.list", {})
+        raised = len(_records(core.get("raised")))
+        picked = _digest_requests(config, core, listing, state, now)
+        omitted = max(0, len(picked) - DIGEST_MAX_ITEMS)
+        items = [
+            _digest_item(deps, config, key, number, section, request)
+            for number, (section, request) in enumerate(picked[:DIGEST_MAX_ITEMS], start=1)
+        ]
+        owed = [_confirmation(entry) for entry in state["pending_confirmations"]]
+        if not items and not owed:
+            state["last_digest"] = _run_record(now, sent=False, items=0, raised=raised)
+            _save(store, state, now)
+            return _digest_output(None, [], 0, raised, reason="nothing_to_list")
+        digest_id = (
+            "dg-"
+            + hashlib.sha256(
+                "|".join([now.isoformat(), *(str(i.request.get("id")) for i in items)]).encode()
+            ).hexdigest()[:16]
+        )
+        message = render.digest_mail(config, digest_id, items, owed, now, omitted=omitted)
+        with Outbox(config, secret(context, "smtp_password") or "", deps.smtp) as outbox:
+            try:
+                outbox.send(message)
+            except TransportError as error:
+                state["last_error"] = _error_record(now, "digest", "smtp_failed", str(error))
+                state["last_digest"] = _run_record(now, sent=False, failed=True, raised=raised)
+                _observe(state, kind="transport", reason="smtp", at=now.isoformat())
+                _save(store, state, now)
+                raise ToolError(
+                    "smtp_failed",
+                    f"sending the digest failed: {error}",
+                    retryable=True,
+                    detail={"items": len(items)},
+                ) from None
+        for item in items:
+            if item.token is None:
+                continue
+            request = item.request
+            expiry = datetime.fromtimestamp(unix_seconds(str(request.get("expires_at"))), UTC)
+            _mark_notified(
+                state,
+                str(request.get("id")),
+                str(request.get("task_id")),
+                expiry,
+                config.key_epoch,
+                now,
+            )
+        state["pending_confirmations"] = []
+        state["last_digest"] = _run_record(
+            now, sent=True, id=digest_id, items=len(items), confirmations=len(owed), raised=raised
+        )
+        _save(store, state, now)
+    return _digest_output(digest_id, items, len(owed), raised, omitted=omitted)
+
+
+def _digest_output(
+    digest_id: str | None,
+    items: list[render.DigestItem],
+    confirmations: int,
+    raised: int,
+    *,
+    reason: str | None = None,
+    omitted: int = 0,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {
+        "sent": digest_id is not None,
+        "digest_id": digest_id,
+        "items": [
+            {
+                "number": item.number,
+                "request_id": str(item.request.get("id", "")),
+                "task_id": str(item.request.get("task_id", "")),
+                "gate": str(item.request.get("gate", "")),
+                "section": item.section,
+            }
+            for item in items
+        ],
+        "confirmations": confirmations,
+        "raised": raised,
+        "omitted": omitted,
+    }
+    if reason is not None:
+        output["reason"] = reason
+    return output
+
+
+def _digest_requests(
+    config: Config,
+    core: dict[str, Any],
+    listing: dict[str, Any],
+    state: dict[str, Any],
+    now: datetime,
+) -> list[tuple[str, dict[str, Any]]]:
+    """The open requests the digest lists, each once, as `(section, request)`.
+
+    Proposed approvals come first, then reminders (requests expiring within core's window, or
+    mailed under an older key epoch and so needing a fresh token), then the other requests the
+    digest holds: review approvals, and in `daily` mode every gate but `block_triage` that no
+    mail has carried yet.
+    """
+    live = {
+        str(request.get("id")): request
+        for request in _records(listing.get("requests"))
+        if request.get("state") == "open" and not _expired(request, now)
+    }
+    for request in _records(core.get("requests")) + _records(core.get("expiring")):
+        if request.get("state") == "open" and not _expired(request, now):
+            live[str(request.get("id"))] = request
+    notified: dict[str, Any] = state["notified"]
+
+    def rekeyed(request: dict[str, Any]) -> bool:
+        epoch = (notified.get(str(request.get("id"))) or {}).get("epoch")
+        return isinstance(epoch, int) and epoch != config.key_epoch
+
+    expiring = {str(request.get("id")) for request in _records(core.get("expiring"))}
+    sections: dict[str, list[dict[str, Any]]] = {"proposed": [], "reminder": [], "held": []}
+    for request_id, request in live.items():
+        gate = str(request.get("gate", ""))
+        if gate == "proposed_approval":
+            sections["proposed"].append(request)
+        elif request_id in expiring or rekeyed(request):
+            sections["reminder"].append(request)
+        elif gate == "review_approval" or (
+            config.digest_mode == "daily"
+            and gate != schedule.IMMEDIATE_GATE
+            and request_id not in notified
+        ):
+            sections["held"].append(request)
+    for requests in sections.values():
+        requests.sort(key=lambda r: (str(r.get("raised_at", "")), str(r.get("id", ""))))
+    return [(name, request) for name, requests in sections.items() for request in requests]
+
+
+def _digest_item(
+    deps: Deps,
+    config: Config,
+    key: str,
+    number: int,
+    section: str,
+    request: dict[str, Any],
+) -> render.DigestItem:
+    request_id = str(request.get("id", ""))
+    task_id = str(request.get("task_id", ""))
+    try:
+        token = mint(key, request_id, task_id, config.key_epoch, str(request.get("expires_at", "")))
+    except TokenError as error:
+        raise ToolError("token_unmintable", str(error)) from None
+    return render.DigestItem(
+        number, section, request, _task(deps, task_id, DIGEST_TASK_FIELDS), token
+    )
+
+
+def _confirmation(entry: dict[str, Any]) -> render.Confirmation:
+    return render.Confirmation(
+        request_id=str(entry["request_id"]),
+        task_id=str(entry["task_id"]),
+        title=str(entry["title"]),
+        answer=str(entry["answer"]),
+        label=str(entry["label"]),
+        task_status=str(entry["task_status"]),
+    )
 
 
 # --- poll ---------------------------------------------------------------------------------
@@ -334,6 +603,8 @@ def _handle(run: _Poll, uid: str) -> dict[str, Any]:
         return _drop(run, uid, sender, "envelope_sender_not_allowed", message)
     if not message.verdicts.passes:
         return _drop(run, uid, sender, "authentication_failed", message)
+    if message.digest_ids:
+        return _handle_digest(run, uid, sender, message)
     if len(message.tokens) != 1:
         return _drop(run, uid, sender, "malformed_token", message)
     if len(message.request_ids) != 1:
@@ -380,6 +651,258 @@ def _handle(run: _Poll, uid: str) -> dict[str, Any]:
     except CoreRefusal as refusal:
         return _core_refusal(run, uid, sender, request, refusal, message)
     return _applied(run, uid, sender, request, reply.answer_id, recovered=False)
+
+
+# --- digest replies -----------------------------------------------------------------------
+
+
+@dataclass
+class _Choice:
+    """One item of a digest reply, read against core's record of its request."""
+
+    number: int
+    request_id: str
+    token: str
+    answer: str
+    request: dict[str, Any]
+    earlier: bool = False
+
+
+def _handle_digest(run: _Poll, uid: str, sender: str, message: inbound.Inbound) -> dict[str, Any]:
+    """Apply a reply to a digest mail item by item (design §6, §7).
+
+    The whole reply is judged before anything is submitted: an ambiguous, out-of-range or
+    unparseable reply, or an item that does not take the named word, applies nothing, spends
+    no token and gets one re-listing mail. Applied items are not mailed one by one; they are
+    queued and confirmed together in the next digest.
+    """
+    if len(message.digest_ids) != 1 or message.tokens or message.request_ids:
+        return _drop(run, uid, sender, "malformed_digest", message)
+    (digest_id,) = message.digest_ids
+    numbered: dict[int, tuple[str, str]] = {}
+    for number, request_id, token in message.digest_items:
+        if number in numbered:
+            return _drop(run, uid, sender, "malformed_digest", message)
+        numbered[number] = (request_id, token)
+    if not numbered:
+        reason = (
+            "the reply carries none of the digest's orbit-item lines; reply to the digest "
+            "mail itself and keep its quoted text"
+        )
+        return _digest_refused(run, uid, sender, digest_id, reason, numbered, "refused_unparseable")
+    if message.text is None:
+        reply = grammar.DigestReply("unparseable", (), "", "the reply has no readable text part")
+    else:
+        reply = grammar.parse_digest(message.text, set(numbered))
+    if reply.outcome != "answers":
+        outcome = "refused_not_allowed" if reply.outcome == "not_allowed" else "refused_unparseable"
+        return _digest_refused(run, uid, sender, digest_id, reply.reason, numbered, outcome)
+
+    chosen: list[_Choice] = []
+    failed: list[tuple[int, str, str]] = []
+    for number, verb in reply.choices:
+        request_id, token = numbered[number]
+        try:
+            request = _show(run.deps, request_id)
+        except CoreRefusal as refusal:
+            failed.append((number, request_id, refusal.code))
+            continue
+        earlier = _applied_by(request, token)
+        answer = _answer_for(request, verb)
+        if answer is None and not earlier:
+            reason = (
+                f"item {number} does not take `{verb}`; the words it takes are listed in the digest"
+            )
+            return _digest_refused(
+                run, uid, sender, digest_id, reason, numbered, "refused_not_allowed"
+            )
+        resolved = str(request["resolution"].get("answer_id", "")) if earlier else answer
+        chosen.append(_Choice(number, request_id, token, resolved or "", request, earlier))
+
+    applied: list[dict[str, Any]] = []
+    refused = list(failed)
+    for choice in chosen:
+        if not choice.earlier:
+            submission: dict[str, Any] = {
+                "id": choice.request_id,
+                "channel": run.config.channel,
+                "answer": choice.answer,
+                "token": choice.token,
+                "sender": sender,
+                "auth_results": message.verdicts.header,
+            }
+            if reply.note:
+                submission["note"] = reply.note
+            try:
+                _call_raw(run.deps, "orbit.decision.submit", submission)
+            except CoreRefusal as refusal:
+                code = refusal.code
+                _observe(
+                    run.state,
+                    kind="refusal",
+                    reason=code,
+                    at=run.now.isoformat(),
+                    sender=sender,
+                    request_id=choice.request_id,
+                )
+                if code in SILENT_REFUSALS and not applied and not refused:
+                    return _drop(run, uid, sender, code, message, counted=False)
+                if code not in MAILED_REFUSALS and code not in SILENT_REFUSALS:
+                    raise _Halt(
+                        ToolError(
+                            "submit_refused",
+                            f"core refused the submission for {choice.request_id} with {code}; "
+                            "the channel needs operator attention and the reply stays unseen",
+                            detail={"refusal": code},
+                        )
+                    ) from None
+                refused.append((choice.number, choice.request_id, code))
+                continue
+        _queue_confirmation(run, choice)
+        applied.append(
+            {
+                "number": choice.number,
+                "request_id": choice.request_id,
+                "outcome": "applied_earlier" if choice.earlier else "applied",
+                "answer": choice.answer,
+            }
+        )
+    mail = _digest_item_refusals(run, sender, digest_id, len(applied), refused, chosen)
+    _file(run, uid)
+    items = applied + [
+        {"number": number, "request_id": rid, "outcome": "refused", "refusal": code}
+        for number, rid, code in refused
+    ]
+    items.sort(key=lambda item: int(item["number"]))
+    outcome = "applied" if not refused else ("applied_partial" if applied else "refused")
+    extra: dict[str, Any] = {"digest_id": digest_id, "items": items}
+    if mail:
+        extra["mail"] = mail
+    return _result(uid, outcome, None, sender, **extra)
+
+
+def _applied_by(request: dict[str, Any], token: str) -> bool:
+    """Whether this reply's own earlier submission already landed (see `_handle`)."""
+    resolution = request.get("resolution")
+    return (
+        request.get("state") == "answered"
+        and isinstance(resolution, dict)
+        and fingerprint(token) in str(resolution.get("provenance", ""))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    )
+
+
+def _answer_for(request: dict[str, Any], word: str) -> str | None:
+    """The request's answer id that the digest word names, or None when it has none."""
+    for answer in _records(request.get("answers")):
+        if grammar.normalize(str(answer.get("id", ""))) == word:
+            return str(answer.get("id"))
+    return None
+
+
+def _queue_confirmation(run: _Poll, choice: _Choice) -> None:
+    current = _show_quietly(run.deps, choice.request_id) or {**choice.request, "state": "answered"}
+    task_id = str(choice.request.get("task_id", ""))
+    task = _task(run.deps, task_id)
+    label = next(
+        (
+            str(answer.get("label", ""))
+            for answer in _records(current.get("answers"))
+            if answer.get("id") == choice.answer
+        ),
+        choice.answer,
+    )
+    queue_confirmation(
+        run.state,
+        {
+            "request_id": choice.request_id,
+            "task_id": render.line(task_id, 64),
+            "title": render.line(task.get("title") or "(untitled task)", 120),
+            "answer": render.line(choice.answer, 64),
+            "label": render.line(label or choice.answer),
+            "task_status": render.line(task.get("status") or "", 40),
+            "at": run.now.isoformat(),
+        },
+    )
+
+
+def _digest_refused(
+    run: _Poll,
+    uid: str,
+    sender: str,
+    digest_id: str,
+    reason: str,
+    numbered: dict[int, tuple[str, str]],
+    outcome: str,
+) -> dict[str, Any]:
+    """Refuse a whole digest reply: a re-listing mail (loop guard and hourly rate limit)."""
+    entry = run.state["parse_refusals"].get(digest_id) or {}
+    count = int(entry.get("count", 0)) + 1
+    run.state["parse_refusals"][digest_id] = {"count": count, "at": run.now.isoformat()}
+    if count > PARSE_REFUSAL_MAILS:
+        _observe(
+            run.state, kind="loop_guard", reason="loop_guard", at=run.now.isoformat(), sender=sender
+        )
+        mail = "loop_guard"
+    else:
+        mail = _rate_limited(
+            run,
+            digest_id,
+            sender,
+            lambda: render.digest_refusal_mail(
+                run.config, sender, digest_id, reason, _relisted(run, numbered), run.now
+            ),
+        )
+    run.mailbox.mark_seen(uid, flagged=True)
+    return _result(uid, outcome, None, sender, digest_id=digest_id, reason=reason, mail=mail)
+
+
+def _relisted(run: _Poll, numbered: dict[int, tuple[str, str]]) -> list[render.DigestItem]:
+    """The digest's items as the reply's own `orbit-item:` lines name them, read afresh."""
+    items: list[render.DigestItem] = []
+    for number, (request_id, token) in sorted(numbered.items())[:DIGEST_MAX_ITEMS]:
+        request = _show_quietly(run.deps, request_id) or {"id": request_id, "state": "unknown"}
+        task = _task(run.deps, str(request.get("task_id", "")), DIGEST_TASK_FIELDS)
+        open_ = request.get("state") == "open"
+        items.append(render.DigestItem(number, "listed", request, task, token if open_ else None))
+    return items
+
+
+def _digest_item_refusals(
+    run: _Poll,
+    sender: str,
+    digest_id: str,
+    applied: int,
+    refused: list[tuple[int, str, str]],
+    chosen: list[_Choice],
+) -> str | None:
+    """One mail for the items core refused; None when every item landed."""
+    if not refused:
+        return None
+    tasks = {choice.request_id: str(choice.request.get("task_id", "")) for choice in chosen}
+    rows = [(number, tasks.get(rid, "?"), rid, code) for number, rid, code in refused]
+    to = run.config.notify_to if any(code == "token_consumed" for _, _, code in refused) else sender
+    return _rate_limited(
+        run,
+        digest_id,
+        to,
+        lambda: render.digest_item_refusals_mail(run.config, to, digest_id, applied, rows),
+    )
+
+
+def _rate_limited(run: _Poll, key: str, to: str, build: Callable[[], Any]) -> str:
+    """Send `build()` unless a refusal mail for `key` went out within the last hour."""
+    last = run.state["refusal_mail"].get(key)
+    if isinstance(last, dict):
+        try:
+            then = datetime.fromisoformat(str(last.get("at")))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        except ValueError:
+            then = None
+        if then is not None and run.now - then < REFUSAL_MAIL_INTERVAL:
+            return "rate_limited"
+    mail = _send(run, build(), sender=to, request_id=key)
+    if mail == "sent":
+        run.state["refusal_mail"][key] = {"at": run.now.isoformat()}
+    return mail
 
 
 def _applied(
@@ -473,24 +996,12 @@ def _parse_refusal(run: _Poll, sender: str, request: dict[str, Any], reason: str
 def _rate_limited_refusal(
     run: _Poll, request: dict[str, Any], to: str, code: str, detail: str
 ) -> str:
-    request_id = str(request.get("id", ""))
-    last = run.state["refusal_mail"].get(request_id)
-    if isinstance(last, dict):
-        try:
-            then = datetime.fromisoformat(str(last.get("at")))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        except ValueError:
-            then = None
-        if then is not None and run.now - then < REFUSAL_MAIL_INTERVAL:
-            return "rate_limited"
-    mail = _send(
+    return _rate_limited(
         run,
-        render.refusal_mail(run.config, to, request, code, detail),
-        sender=to,
-        request_id=request_id,
+        str(request.get("id", "")),
+        to,
+        lambda: render.refusal_mail(run.config, to, request, code, detail),
     )
-    if mail == "sent":
-        run.state["refusal_mail"][request_id] = {"at": run.now.isoformat()}
-    return mail
 
 
 def _superseded_detail(deps: Deps, request_id: str) -> str:

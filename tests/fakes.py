@@ -18,7 +18,7 @@ import json
 import smtplib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,8 @@ def config(**overrides: Any) -> dict[str, Any]:
         "smtp_host": "smtp.example.org",
         "imap_host": "imap.example.org",
         "key_epoch": 3,
+        # The ORB-18304 tests mail every request as it is raised; digest tests choose a mode.
+        "digest_mode": "immediate",
         "dashboard_url": "http://dk-server-2:7300/tasks/{task_id}",
     }
     values.update(overrides)
@@ -220,6 +222,9 @@ class FakeCore:
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=lambda: [])
     fail: dict[str, CallbackError] = field(default_factory=lambda: {})
     refuse_submit: str | None = None
+    # Core's clock for the digest's raise times and its 24-hour expiry window.
+    now: datetime = field(default_factory=lambda: datetime(2026, 10, 29, 9, 0, tzinfo=UTC))
+    digest_enabled: bool = True
 
     def add(self, request: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
         self.requests[request["id"]] = request
@@ -247,7 +252,56 @@ class FakeCore:
             return dict(self.tasks[payload["id"]])
         if tool == "orbit.decision.submit":
             return self._submit(payload)
+        if tool == "orbit.decision.digest":
+            return self._digest(payload)
         raise AssertionError(f"plugin called an ungranted tool {tool}")
+
+    def _digest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """`orbit.decision.digest`: raise a proposed_approval per proposed task, return the set."""
+        if payload["channel"] != self.channel:
+            raise _refusal("policy denied", "channel_not_registered", "no such channel")
+        if self.revoked:
+            raise _refusal("policy denied", "channel_revoked", "the channel is revoked")
+        if not self.digest_enabled:
+            return {"requests": [], "raised": [], "expiring": [], "count": 0}
+        raised: list[dict[str, Any]] = []
+        approvals: list[dict[str, Any]] = []
+        for task_id, task_record in list(self.tasks.items()):
+            if task_record["status"] != "proposed":
+                continue
+            current = next(
+                (
+                    r
+                    for r in self.requests.values()
+                    if r["task_id"] == task_id
+                    and r["gate"] == "proposed_approval"
+                    and r["state"] == "open"
+                ),
+                None,
+            )
+            if current is None:
+                current = approval_request(
+                    f"dr-{len(self.requests) + 1:016x}",
+                    task_id,
+                    raised_at=self.now,
+                )
+                self.requests[current["id"]] = current
+                raised.append(current)
+            approvals.append(current)
+        horizon = self.now + timedelta(hours=24)
+        expiring = [
+            r
+            for r in self.requests.values()
+            if r["state"] == "open"
+            and datetime.fromisoformat(r["expires_at"].replace("Z", "+00:00")) <= horizon
+        ]
+        requests = approvals + [r for r in expiring if r not in approvals]
+        return {
+            "requests": requests,
+            "raised": raised,
+            "expiring": expiring,
+            "count": len(requests),
+        }
 
     def _request(self, request_id: str) -> dict[str, Any]:
         if request_id not in self.requests:
@@ -304,7 +358,7 @@ class FakeCore:
             "note": payload.get("note"),
             "answered_at": "2026-10-26T09:00:00Z",
         }
-        self.tasks[request["task_id"]]["status"] = "backlog"
+        self.tasks[request["task_id"]]["status"] = "rejected" if answer == "reject" else "backlog"
         return dict(request)
 
 
@@ -343,6 +397,41 @@ def triage_request(request_id: str = "dr-0123456789abcdef", **overrides: Any) ->
     request["binding"] = {"kind": "block_episode", "episode": "2026-10-28T11:00:00Z"}
     request.update(overrides)
     return request
+
+
+def approval_request(
+    request_id: str, task_id: str, *, raised_at: datetime, ttl_hours: int = 72, **overrides: Any
+) -> dict[str, Any]:
+    """A digest-raised proposed_approval request, as core raises it (answers approve/reject)."""
+    request: dict[str, Any] = {
+        "id": request_id,
+        "task_id": task_id,
+        "gate": "proposed_approval",
+        "answers": [
+            {"id": "approve", "label": "Approve", "consequence": "Promote it through task-pilot."},
+            {"id": "reject", "label": "Reject", "consequence": "Reject the proposal."},
+        ],
+        "binding": {"kind": "task_revision", "revision": "spec-digest"},
+        "raised_by": "digest",
+        "raised_at": raised_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": (raised_at + timedelta(hours=ttl_hours)).isoformat().replace("+00:00", "Z"),
+        "state": "open",
+    }
+    request.update(overrides)
+    return request
+
+
+def proposed_task(task_id: str, title: str, description: str, **overrides: Any) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "id": task_id,
+        "title": title,
+        "description": description,
+        "status": "proposed",
+        "readiness": {"ready": True, "gaps": []},
+        "pilot_warnings": [],
+    }
+    record.update(overrides)
+    return record
 
 
 def task(status: str = "backlog") -> dict[str, Any]:
@@ -396,6 +485,31 @@ def reply(
         message.set_content(f"<p>{body}</p>", subtype="html")
     else:
         message.set_content(body + quoted)
+    return message.as_bytes()
+
+
+def digest_reply(
+    body: str,
+    digest_mail: str,
+    *,
+    digest_id: str,
+    sender: str = OPERATOR,
+    keep_lines: bool = True,
+) -> bytes:
+    """A reply to a digest mail: the answer on top, the original quoted below as clients do."""
+    message = EmailMessage(policy=email.policy.SMTP)
+    message["Return-Path"] = f"<{sender}>"
+    message["Delivered-To"] = MAILBOX
+    message["Authentication-Results"] = stamp()
+    message["From"] = f"Daniel <{sender}>"
+    message["To"] = MAILBOX
+    message["Subject"] = f"Re: [orbit] decision digest 2026-10-29: 3 to decide [{digest_id}]"
+    message["Message-ID"] = "<digest-reply-1@example.com>"
+    original = digest_mail.splitlines()
+    if not keep_lines:
+        original = [line for line in original if not line.startswith("orbit-")]
+    quoted = "\n".join(f"> {line}" for line in original)
+    message.set_content(f"{body}\n\nOn Sat, Orbit wrote:\n{quoted}\n")
     return message.as_bytes()
 
 

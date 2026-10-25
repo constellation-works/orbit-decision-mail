@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision-mail.digest response",
+  "type": "object",
+  "properties": {
+    "sent": { "type": "boolean", "description": "Whether a digest mail went out." },
+    "digest_id": { "type": ["string", "null"], "pattern": "^dg-[0-9a-f]{16}$" },
+    "reason": {
+      "type": "string",
+      "enum": ["mode_off", "nothing_to_list"],
+      "description": "Why no mail was sent."
+    },
+    "items": {
+      "type": "array",
+      "description": "The numbered items the digest listed, in order. Never a token.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "request_id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "gate": { "type": "string" },
+          "section": { "type": "string", "enum": ["proposed", "reminder", "held"] }
+        },
+        "required": ["number", "request_id", "task_id", "gate", "section"],
+        "additionalProperties": false
+      }
+    },
+    "confirmations": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Applied digest answers the mail confirmed."
+    },
+    "raised": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Approval requests core raised for this digest."
+    },
+    "omitted": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Requests that did not fit in this digest; the next one lists them."
+    }
+  },
+  "required": ["sent", "digest_id", "items", "confirmations", "raised", "omitted"],
+  "additionalProperties": false
+}

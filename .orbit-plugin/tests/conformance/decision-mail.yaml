@@ -30,7 +30,9 @@ tests:
         activity:
           last_notify: null
           last_poll: null
+          last_digest: null
           last_error: null
+          pending_confirmations: 0
           notified_requests: 0
           recent_drops: []
           bound: 20
@@ -69,7 +71,9 @@ tests:
         activity:
           last_notify: null
           last_poll: null
+          last_digest: null
           last_error: null
+          pending_confirmations: 0
           notified_requests: 0
           recent_drops: []
           bound: 20
@@ -113,6 +117,18 @@ tests:
     expect:
       error:
         code: not_configured
+  - name: digest_refuses_until_configured
+    tool: digest
+    input: {}
+    expect:
+      error:
+        code: not_configured
+  - name: digest_refuses_unknown_input
+    tool: digest
+    input: {"all": true}
+    expect:
+      error:
+        code: invalid_argument
   - name: poll_refuses_until_configured
     tool: poll
     input: {}

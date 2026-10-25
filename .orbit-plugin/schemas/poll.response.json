@@ -15,6 +15,7 @@
             "enum": [
               "applied",
               "applied_earlier",
+              "applied_partial",
               "refused",
               "refused_unparseable",
               "refused_not_allowed",
@@ -22,10 +23,27 @@
             ]
           },
           "request_id": { "type": "string" },
+          "digest_id": { "type": "string", "description": "The digest mail a reply answered." },
+          "items": {
+            "type": "array",
+            "description": "A digest reply's items, by the number the mail printed.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "number": { "type": "integer", "minimum": 1 },
+                "request_id": { "type": "string" },
+                "outcome": { "type": "string", "enum": ["applied", "applied_earlier", "refused"] },
+                "answer": { "type": "string" },
+                "refusal": { "type": "string", "description": "Core's refusal code." }
+              },
+              "required": ["number", "request_id", "outcome"],
+              "additionalProperties": false
+            }
+          },
           "sender": { "type": "string" },
           "answer": { "type": "string" },
           "refusal": { "type": "string", "description": "Core's refusal code." },
-          "reason": { "type": "string", "description": "Why a mail was dropped." },
+          "reason": { "type": "string", "description": "Why a mail was dropped or a reply refused." },
           "mail": {
             "type": "string",
             "enum": ["sent", "failed", "rate_limited", "loop_guard"],

@@ -95,6 +95,17 @@ and `key_epoch` (`1`). Set `smtp_username` or `imap_username` only when the logi
 the mailbox address. Set `dashboard_url` if mails should link at a task; `{task_id}` and
 `{request_id}` are filled in.
 
+Batching and quiet hours are plugin config too (not core `[decision_channel]`):
+
+```bash
+orbit config set plugins.decision-mail.digest_mode daily      # immediate | daily | off
+orbit config set plugins.decision-mail.quiet_hours 22:00-07:00  # host-local; empty for none
+```
+
+`daily` mails `block_triage` requests at once and holds other gates for the digest. During
+quiet hours `notify` and `digest` fail with the retryable `quiet_hours` error and send at the
+end of the window.
+
 Turn the channel on in the workspace config (`[decision_channel] enabled = true`) before
 expecting requests to be raised. With it off, core raises nothing and there is nothing to
 mail.
@@ -131,9 +142,10 @@ is refused by core as `sender_not_allowed` and also gets no reply mail.
 
 ## 6. Enable the routines
 
-`orbit plugin enable` seeds two routines, switched off, as
-`.orbit/routines/decision-mail-notify.yaml` and
-`.orbit/routines/decision-mail-poll.yaml`.
+`orbit plugin enable` seeds three routines, switched off, as
+`.orbit/routines/decision-mail-notify.yaml`,
+`.orbit/routines/decision-mail-poll.yaml` and
+`.orbit/routines/decision-mail-digest.yaml`.
 
 `decision-mail-notify` fires when a decision request is raised. Before turning it on, set
 `trigger.state.owner_machine` to this host (`orbit host list`) and `trigger.state.branch`
@@ -142,12 +154,18 @@ and `main` until you change them.
 
 `decision-mail-poll` runs every five minutes and reads the mailbox.
 
+`decision-mail-digest` runs daily at 08:00 and mails the digest. Routines reject a `dedupe`
+key, so `policy.overlap: forbid` keeps a second digest from starting while one runs. Reply to
+a digest with `approve 1,3` or `reject 2`; a bare `approve` or a number not in the list is
+refused with a re-listing mail and consumes nothing.
+
 In each file set `enabled: true`, then confirm the clock will see them:
 
 ```bash
 orbit routine list
 orbit routine show decision-mail-notify
 orbit routine show decision-mail-poll
+orbit routine show decision-mail-digest
 orbit clock status
 ```
 

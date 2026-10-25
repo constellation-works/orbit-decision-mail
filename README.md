@@ -47,6 +47,7 @@ orbit plugin test "$out" --grant fs,network
 | `decision-mail.activity` | read-only | The same counters and newest 20 events, and nothing else. This is what the dashboard panel "Drops and refusals" renders. Contacts no server and writes nothing. |
 | `decision-mail.notify` | mutating | Lists open decision requests (`orbit.decision.list`) and mails each one not mailed yet: subject `[orbit] decision needed: <title> (<task>) [<request>]`, `Reply-To: <local>+<token>@<domain>`, `orbit-token:`/`orbit-request:` lines, the numbered answers and the dashboard link. Input `request_ids` limits it to some requests, `resend: true` mails them again. A send failure fails the call (retryable). |
 | `decision-mail.poll` | mutating | Reads unseen mail (oldest first, at most `max_messages`), authenticates it and submits each answer to `orbit.decision.submit`, then sends a confirmation or a refusal and files the mail. |
+| `decision-mail.digest` | mutating | Sends the daily digest: one mail listing proposed tasks (title, summary, pilot state), then requests held for the digest, then requests expiring within 24 hours, each numbered with `orbit-item:` transport lines carrying its request id and token. Core's `orbit.decision.digest` raises the missing `proposed_approval` and `review_approval` requests first, so their expiry counts from this send. Batched confirmations of earlier digest answers ride in the same mail. Nothing to list and nothing owed sends no mail. At most 50 items; the rest are counted as `omitted`. |
 | `decision-mail.parse-reply` | read-only | Applies the reply grammar to `text` against the printed `answers`; reads and sends nothing. |
 
 No tool takes or returns a password, the channel key or a token. Every response and log
@@ -57,6 +58,40 @@ SMTP and IMAP transport errors, and loop-guard suppressions. The newest 20 event
 them. An event keeps the sender address, the reason, the request id and the time. It does not
 keep a body, a token, a secret or a header. A 21st event evicts the oldest. `status` and
 `activity` both report the figures; the runbook says where an operator looks.
+
+### Batching, quiet hours and the digest
+
+Both settings are plugin config under `[plugins.decision-mail]` (set them with `orbit config
+set plugins.decision-mail.<key>`), not core `[decision_channel]` settings. Core stays
+transport-agnostic and raises requests the same way whatever these say.
+
+- `digest_mode = immediate`: `notify` mails every request as it is raised. The digest still
+  lists proposed tasks and expiring requests.
+- `digest_mode = daily` (default): `notify` mails `block_triage` requests immediately, since
+  a blocked task is stopped work, and holds every other gate for the digest.
+- `digest_mode = off`: `notify` and `digest` send nothing; answers on the dashboard or CLI
+  still work.
+- `quiet_hours = HH:MM-HH:MM` (host-local, 24-hour, may wrap midnight, empty for none):
+  while the window is open, `notify` and `digest` send nothing and fail with the retryable
+  `quiet_hours` error naming the end of the window, so a state-trigger member is retried
+  rather than settled without a mail. With `22:00-07:00`, a 23:00 send goes out at 07:00 and
+  the expiry the mail prints counts from 07:00. Core fixes the real expiry when it raises the
+  request, so the plugin renders the remaining time at send time and skips a request that
+  expired while it waited.
+
+The digest routine (`decision-mail-digest`, cron `0 8 * * *`) is seeded disabled. Core
+routines reject a `dedupe` key, so `policy.overlap: forbid` is what stops a second digest
+starting while one runs (the equivalent of `skip_if_open`).
+
+A digest reply names items by number on its first unquoted line: `approve 1,3` approves
+items 1 and 3 only, `reject 2` rejects item 2, and clauses combine (`approve 1,3; reject 2`).
+Any answer word works (`clear 4`). A bare `approve`, `approve all`, an out-of-range number,
+an item both approved and rejected, or more than 50 numbers is refused whole with a mail
+re-listing the items; it consumes no token and submits nothing. A valid reply submits each
+named item through `orbit.decision.submit` with that item's token; core re-checks each one.
+Several digest answers landing in one poll produce one confirmation, listed in the next
+digest rather than as a mail each. A refusal mail is limited to one per digest per hour and
+the unparseable-reply loop guard applies as for single requests.
 
 ### How poll treats a reply
 
@@ -103,6 +138,8 @@ documents each key.
 | `dashboard_url` | empty | Link closing each mail; `{task_id}` and `{request_id}` are filled in. |
 | `max_messages` | `10` | Replies one poll handles. |
 | `from_name` | `Orbit` | Display name on sent mail. |
+| `digest_mode` | `daily` | `immediate`, `daily` or `off`; see "Batching, quiet hours and the digest". Plugin config, not core `[decision_channel]`. |
+| `quiet_hours` | empty | Host-local `HH:MM-HH:MM` window (may wrap midnight) during which nothing is mailed; sends wait for its end. |
 
 Secrets (`orbit plugin secret set decision-mail <name>`): `smtp_password`, `imap_password`
 and `channel_key`. Registering the channel mirrors `channel_key` for you.
@@ -143,7 +180,9 @@ On dk-server-2:
 
 5. Enable the seeded routines. `decision-mail-notify` is a `decision_requested` state
    trigger: first set its `trigger.state.owner_machine` (`orbit host list`) and
-   `trigger.state.branch`. `decision-mail-poll` runs every five minutes.
+   `trigger.state.branch`. `decision-mail-poll` runs every five minutes. `decision-mail-digest` (daily at 08:00,
+`overlap: forbid`) is seeded disabled; enable it when `digest_mode` is `daily` or
+`immediate` and you want proposed tasks and expiring requests mailed.
 
 6. Check `orbit tool run decision-mail.status` reads `ready`, then answer one request
    from your inbox and confirm the confirmation mail arrives.

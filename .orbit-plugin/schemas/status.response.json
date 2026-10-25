@@ -40,6 +40,12 @@
       "properties": {
         "last_notify": { "type": ["object", "null"] },
         "last_poll": { "type": ["object", "null"] },
+        "last_digest": { "type": ["object", "null"] },
+        "pending_confirmations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Applied digest answers waiting for the next digest to confirm them."
+        },
         "last_error": { "type": ["object", "null"] },
         "notified_requests": { "type": "integer", "minimum": 0 },
         "recent_drops": {
@@ -58,7 +64,9 @@
       "required": [
         "last_notify",
         "last_poll",
+        "last_digest",
         "last_error",
+        "pending_confirmations",
         "notified_requests",
         "recent_drops",
         "counters",

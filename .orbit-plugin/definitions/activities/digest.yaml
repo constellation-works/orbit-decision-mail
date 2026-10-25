@@ -1,0 +1,18 @@
+# The deterministic step behind decision_mail_digest_pipeline: one decision-mail.digest
+# call, no model. It raises the approval requests the digest lists and mails them; it applies
+# nothing.
+schemaVersion: 2
+kind: Activity
+metadata:
+  name: decision_mail_digest
+spec:
+  type: deterministic
+  description: >-
+    Send the decision digest through decision-mail.digest: proposed tasks, requests nearing
+    expiry and confirmations of answers applied from earlier digest replies.
+  input_schema_json:
+    type: object
+  action: plugin.tool_call
+  config:
+    tool: decision-mail.digest
+    input: {}

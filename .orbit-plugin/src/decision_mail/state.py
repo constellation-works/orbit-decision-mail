@@ -7,9 +7,13 @@ address, the reason, the request id and the time. `notify` and `poll` hold `run.
 their whole call, so two calls never interleave their read-modify-write; the file is replaced
 atomically and created owner-only. A state file written by a newer plugin is never overwritten.
 
+Digest answers are confirmed in batches: `poll` queues one `pending_confirmations` entry per
+applied item (request, task, title, answer, task status; no mail text) and the next digest mail
+lists and clears them. `last_digest` records the latest digest sent.
+
 Counters are cumulative for the life of the state file. The event list keeps the newest
-`MAX_EVENTS` (20); an older event is evicted first. Schema 1 files still load. The next save
-stamps schema 2, which this shape belongs to.
+`MAX_EVENTS` (20); an older event is evicted first. Schema 1 and 2 files still load. The next
+save stamps schema 3, which this shape belongs to.
 """
 
 from __future__ import annotations
@@ -25,11 +29,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATE_FILE = "state.json"
 LOCK_FILE = "run.lock"
 LOCK_DEADLINE_SECONDS = 20.0
 MAX_DROPS = 20
+# Applied digest answers waiting for the next digest; the oldest is evicted past the bound.
+MAX_PENDING = 100
 # Newest events kept. Documented in README.md and docs/runbook.md; tests import this name.
 MAX_EVENTS = 20
 RETAIN = timedelta(days=14)
@@ -64,10 +70,12 @@ def empty() -> dict[str, Any]:
         "refusal_mail": {},
         "parse_refusals": {},
         "drops": [],
+        "pending_confirmations": [],
         "counters": empty_counters(),
         "events": [],
         "last_notify": None,
         "last_poll": None,
+        "last_digest": None,
         "last_error": None,
     }
 
@@ -167,6 +175,14 @@ def record_drop(state: dict[str, Any], entry: dict[str, Any]) -> None:
     del drops[:-MAX_DROPS]
 
 
+def queue_confirmation(state: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Remember an applied digest answer for the next digest; one entry per request."""
+    pending: list[Any] = state["pending_confirmations"]
+    pending[:] = [item for item in pending if item.get("request_id") != entry.get("request_id")]
+    pending.append(entry)
+    del pending[:-MAX_PENDING]
+
+
 def record_event(
     state: dict[str, Any],
     *,
@@ -244,6 +260,12 @@ def normalize(state: dict[str, Any]) -> None:
         "transport": {"smtp": _count(transport.get("smtp")), "imap": _count(transport.get("imap"))},
         "loop_guard": _count(loop_guard),
     }
+    pending = state.get("pending_confirmations")
+    state["pending_confirmations"] = (
+        [item for item in pending if _pending_ok(item)][-MAX_PENDING:]
+        if isinstance(pending, list)
+        else []
+    )
     events = state.get("events")
     kept = [event for event in events if _event_ok(event)] if isinstance(events, list) else []
     state["events"] = kept[-MAX_EVENTS:]
@@ -287,6 +309,15 @@ def _sender(value: str | None) -> str | None:
     return text if len(text) <= 120 else text[:119] + "…"
 
 
+def _pending_ok(value: Any) -> bool:
+    fields = ("request_id", "task_id", "title", "answer", "label", "task_status", "at")
+    return (
+        isinstance(value, dict)
+        and all(isinstance(value.get(field), str) for field in fields)
+        and _REQUEST_ID.fullmatch(str(value["request_id"])) is not None
+    )
+
+
 def _event_ok(value: Any) -> bool:
     fields = {"at", "kind", "reason", "sender", "request_id"}
     if not isinstance(value, dict) or set(value) != fields:
@@ -318,6 +349,10 @@ def _prune(state: dict[str, Any], now: datetime) -> None:
             stamp = _stamp(table[request_id], field)
             if stamp is not None and stamp < cutoff:
                 del table[request_id]
+    pending: list[Any] = state["pending_confirmations"]
+    pending[:] = [
+        item for item in pending if (stamp := _stamp(item, "at")) is None or stamp >= now - RETAIN
+    ]
 
 
 def _stamp(entry: Any, field: str) -> datetime | None:

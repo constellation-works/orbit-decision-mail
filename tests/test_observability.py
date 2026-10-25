@@ -345,7 +345,7 @@ def test_events_past_the_bound_evict_the_oldest_first(rig: Rig) -> None:
     assert again["events"][-1]["sender"] == "drop-last@example.net"
 
 
-def test_a_version_1_state_file_loads_and_the_next_save_stamps_schema_2(rig: Rig) -> None:
+def test_a_version_1_state_file_loads_and_the_next_save_stamps_the_current_schema(rig: Rig) -> None:
     rig.state_dir.mkdir()
     path = rig.state_dir / "state.json"
     path.write_text(
@@ -367,7 +367,7 @@ def test_a_version_1_state_file_loads_and_the_next_save_stamps_schema_2(rig: Rig
     _deliver(rig, reply("1", token="A" * 26, sender="mallory@example.net"))
     poll(rig)
     saved = json.loads(path.read_text())
-    assert saved["schema_version"] == SCHEMA_VERSION == 2
+    assert saved["schema_version"] == SCHEMA_VERSION == 3
     assert RID in saved["notified"]
     assert saved["counters"]["drops"]["sender_not_allowed"] == 1
     blob = path.read_text()

@@ -23,6 +23,13 @@ _REQUEST_ID = r"dr-[0-9a-f]{16}"
 _SUBJECT_REQUEST = re.compile(rf"\[({_REQUEST_ID})\]")
 _BODY_TOKEN = re.compile(r"^[>\s]*orbit-token:\s*([A-Za-z2-7]{26})\s*$", re.MULTILINE)
 _BODY_REQUEST = re.compile(rf"^[>\s]*orbit-request:\s*({_REQUEST_ID})\s*$", re.MULTILINE)
+_DIGEST_ID = r"dg-[0-9a-f]{16}"
+_SUBJECT_DIGEST = re.compile(rf"\[({_DIGEST_ID})\]")
+_BODY_DIGEST = re.compile(rf"^[>\s]*orbit-digest:\s*({_DIGEST_ID})\s*$", re.MULTILINE)
+_BODY_ITEM = re.compile(
+    rf"^[>\s]*orbit-item:\s*(\d{{1,3}})\s+({_REQUEST_ID})\s+([A-Za-z2-7]{{26}})\s*$",
+    re.MULTILINE,
+)
 _COMMENT = re.compile(r"\([^()]*\)")
 _RECIPIENT_HEADERS = ("To", "Cc", "Delivered-To", "X-Original-To", "Envelope-To")
 
@@ -54,6 +61,10 @@ class Inbound:
     request_ids: frozenset[str]
     text: str | None
     verdicts: Verdicts
+    # A digest mail's id and its `orbit-item:` lines `(number, request id, token)`; a reply
+    # to a single-request mail carries neither.
+    digest_ids: frozenset[str] = frozenset()
+    digest_items: tuple[tuple[int, str, str], ...] = ()
 
     @property
     def sender(self) -> str | None:
@@ -82,6 +93,11 @@ def read(raw: bytes, config: Config) -> Inbound:
     request_ids = set(_SUBJECT_REQUEST.findall(" ".join(_headers(message, "Subject"))))
     if text is not None:
         request_ids.update(_BODY_REQUEST.findall(text))
+    digest_ids = set(_SUBJECT_DIGEST.findall(" ".join(_headers(message, "Subject"))))
+    items: set[tuple[int, str, str]] = set()
+    if text is not None:
+        digest_ids.update(_BODY_DIGEST.findall(text))
+        items.update((int(n), rid, tag.upper()) for n, rid, tag in _BODY_ITEM.findall(text))
     sender_domain = senders[0].rsplit("@", 1)[-1] if len(senders) == 1 else ""
     stamp = select_stamp(_headers(message, "Authentication-Results"), config.authserv_id)
     return Inbound(
@@ -93,6 +109,8 @@ def read(raw: bytes, config: Config) -> Inbound:
         request_ids=frozenset(request_ids),
         text=text,
         verdicts=judge(stamp, sender_domain),
+        digest_ids=frozenset(digest_ids),
+        digest_items=tuple(sorted(items)),
     )
 
 

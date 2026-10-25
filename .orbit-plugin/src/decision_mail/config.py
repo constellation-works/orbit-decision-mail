@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from email.utils import parseaddr
 from typing import Any
 
+from decision_mail.schedule import MODES, QuietHours, parse_quiet_hours
+
 # The names `spec.secrets` declares in plugin.yaml; tests hold the two equal.
 SECRET_NAMES = ("smtp_password", "imap_password", "channel_key")
 
@@ -37,6 +39,8 @@ DEFAULTS: dict[str, Any] = {
     "max_messages": 10,
     "from_name": "Orbit",
     "dashboard_url": "",
+    "digest_mode": "daily",
+    "quiet_hours": "",
 }
 
 
@@ -70,6 +74,8 @@ class Config:
     max_messages: int
     from_name: str
     dashboard_url: str
+    digest_mode: str
+    quiet_hours: QuietHours | None
 
     @property
     def local_part(self) -> str:
@@ -164,6 +170,8 @@ def load(context: dict[str, Any], *, secrets: tuple[str, ...]) -> Config:
         max_messages=_integer(merged["max_messages"], "max_messages", 1, 50),
         from_name=_text(merged["from_name"], "from_name"),
         dashboard_url=str(merged["dashboard_url"] or "").strip(),
+        digest_mode=_choice(merged["digest_mode"], "digest_mode", MODES),
+        quiet_hours=_quiet_hours(merged["quiet_hours"]),
     )
 
 
@@ -191,6 +199,15 @@ def _choice(value: Any, key: str, choices: tuple[str, ...]) -> str:
     if value not in choices:
         raise ConfigError(f"config key {key} must be one of: {', '.join(choices)}", [])
     return str(value)
+
+
+def _quiet_hours(value: Any) -> QuietHours | None:
+    if not isinstance(value, str):
+        raise ConfigError("config key quiet_hours must be a string like 22:00-07:00", [])
+    try:
+        return parse_quiet_hours(value)
+    except ValueError as error:
+        raise ConfigError(str(error), []) from None
 
 
 def _has_control(text: str) -> bool:

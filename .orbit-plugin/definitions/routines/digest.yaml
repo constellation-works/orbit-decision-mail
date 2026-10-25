@@ -1,0 +1,26 @@
+# Seeded disabled into the workspace's .orbit/routines as decision-mail-digest. A human
+# enables it after the notify and poll routines work. The cron is host-local; keep it outside
+# the plugin's quiet_hours, because a digest that fires inside them fails retryably and is
+# not re-run until the next slot.
+#
+# A routine has no `dedupe` key (Orbit rejects it); `overlap: forbid` is its form of
+# skip_if_open: a fire that comes due while the previous digest run is still in flight is
+# skipped, so two digests never race to mail the same requests.
+schemaVersion: 1
+name: digest
+description: >-
+  Daily at 08:00 host-local, mail one decision digest: proposed tasks first, then reminders
+  for open requests nearing expiry, and a confirmation of every answer applied from a digest
+  reply since the last one. Sends nothing when there is nothing to list. Deterministic: no
+  model.
+enabled: false
+trigger:
+  cron: "0 8 * * *"
+  missed_run: skip
+target: job:decision_mail_digest_pipeline
+policy:
+  timeout_minutes: 10
+  overlap: forbid
+  retries:
+    max: 2
+    backoff_minutes: 10

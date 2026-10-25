@@ -28,7 +28,19 @@
     "processed_folder": { "type": "string", "default": "Orbit/Processed" },
     "max_messages": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Mails one poll handles at most." },
     "from_name": { "type": "string", "default": "Orbit" },
-    "dashboard_url": { "type": "string", "default": "", "description": "Link closing each mail; {task_id} and {request_id} are filled in." }
+    "dashboard_url": { "type": "string", "default": "", "description": "Link closing each mail; {task_id} and {request_id} are filled in." },
+    "digest_mode": {
+      "type": "string",
+      "enum": ["immediate", "daily", "off"],
+      "default": "daily",
+      "description": "When individual request mails go out. immediate: each request as it is raised. daily: block_triage requests at once, every other gate waits for the digest mail. off: no request mail and no digest; requests exist on the dashboard only. Replies to mail already sent are still read."
+    },
+    "quiet_hours": {
+      "type": "string",
+      "default": "",
+      "pattern": "^(([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9])?$",
+      "description": "Host-local HH:MM-HH:MM window (it may wrap midnight, e.g. 22:00-07:00) in which request and digest mail is not sent. A send inside it fails retryably until the window ends. Empty: no quiet hours."
+    }
   },
   "additionalProperties": false
 }

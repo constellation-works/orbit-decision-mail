@@ -32,9 +32,11 @@ spec:
       write: ["{{plugin_state}}"]
     # SMTP and IMAP to the channel mailbox; also the first call's interpreter fetch.
     network: any
-    # Callbacks through the plugin's callback session. decision.submit is the only
-    # write, and core applies it only for the channel bound to this plugin.
+    # Callbacks through the plugin's callback session. decision.submit applies an answer and
+    # decision.digest raises the approval requests the digest lists; core allows both only
+    # for the channel bound to this plugin.
     orbit_tools:
+      - orbit.decision.digest
       - orbit.decision.list
       - orbit.decision.show
       - orbit.decision.submit
@@ -79,21 +81,39 @@ spec:
       output_schema: { $ref: schemas/activity.response.json }
     - name: notify
       description: >-
-        Mail every open decision request that has not been mailed yet (or only
+        Mail the open decision requests that have not been mailed yet (or only
         `request_ids`) to the operator over SMTP, with the per-request reply token, the
-        numbered answers and the dashboard link. Records what it sent in plugin state so a
-        request is mailed once; a send failure fails the call so the routine retries.
+        numbered answers and the dashboard link, as `digest_mode` allows: `immediate` mails
+        all, `daily` only block_triage (other gates wait for the digest), `off` none. Records
+        what it sent in plugin state so a request is mailed once; a send failure, or a send
+        inside the quiet hours, fails the call so the routine retries.
       execution_kind: mutating
       mcp_scope: workspace
       input_schema: { $ref: schemas/notify.request.json }
       output_schema: { $ref: schemas/notify.response.json }
+    - name: digest
+      description: >-
+        Send the decision digest: one mail listing proposed tasks first (title, one-line
+        summary, pilot state), then open requests nearing expiry or mailed under an older key
+        epoch, then the requests `daily` mode held for it, each numbered with its own token,
+        followed by the answers applied from earlier digest replies. Raises what is missing
+        through orbit.decision.digest, so every request it lists is timed from this send.
+        Sends nothing when there is nothing to list, when `digest_mode` is `off`, and fails
+        retryably inside the quiet hours. A send failure fails the call.
+      execution_kind: mutating
+      mcp_scope: workspace
+      input_schema: { $ref: schemas/digest.request.json }
+      output_schema: { $ref: schemas/digest.response.json }
     - name: poll
       description: >-
         Read unseen mail in the channel mailbox over IMAP. A reply from an allowlisted
         sender whose provider stamp shows DKIM and SPF pass (and no DMARC fail) is parsed
         with the closed answer grammar and submitted to orbit.decision.submit; core
-        verifies and applies it. Sends a confirmation or a rate-limited refusal mail, and
-        files handled mail to the processed folder. Forged or unknown mail is dropped
+        verifies and applies it. A reply to a digest mail answers item by item (`approve
+        1,3`, `reject 2`); a bare `approve` or an unknown item number refuses the whole
+        reply and applies nothing. Sends a confirmation (queued for the next digest when it
+        answers a digest) or a rate-limited refusal mail, and files handled mail to the
+        processed folder. Forged or unknown mail is dropped
         without a reply. Never deletes mail.
       execution_kind: mutating
       mcp_scope: workspace

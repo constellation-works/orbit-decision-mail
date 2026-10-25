@@ -16,7 +16,16 @@ from typing import Any
 
 from decision_mail import NAMESPACE, redact
 from decision_mail.errors import ToolError
-from decision_mail.tools import Deps, activity, default_deps, notify, parse_reply, poll, status
+from decision_mail.tools import (
+    Deps,
+    activity,
+    default_deps,
+    digest,
+    notify,
+    parse_reply,
+    poll,
+    status,
+)
 
 __all__ = ["SCHEMA_VERSION", "TOOLS", "ToolError", "dispatch", "serve"]
 
@@ -33,6 +42,7 @@ TOOLS: Mapping[str, tuple[frozenset[str], Handler]] = {
     "activity": (frozenset(), activity),
     "notify": (frozenset({"request_ids", "resend"}), notify),
     "poll": (frozenset(), poll),
+    "digest": (frozenset(), digest),
     "parse-reply": (frozenset({"text", "answers"}), parse_reply),
 }
 

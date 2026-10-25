@@ -28,6 +28,7 @@ EXECUTION_KIND = {
     "parse-reply": "read_only",
     "notify": "mutating",
     "poll": "mutating",
+    "digest": "mutating",
 }
 
 
@@ -118,7 +119,7 @@ def test_routines_ship_disabled_and_target_shipped_jobs() -> None:
     routines = definitions("routines")
     jobs = definitions("jobs")
     activities = definitions("activities")
-    assert set(routines) == {"notify", "poll"}
+    assert set(routines) == {"notify", "poll", "digest"}
     for routine in routines.values():
         assert routine["enabled"] is False
         assert routine["target"].removeprefix("job:") in jobs
@@ -127,11 +128,17 @@ def test_routines_ship_disabled_and_target_shipped_jobs() -> None:
     # Core's decision_requested trigger targets exactly this job name.
     assert routines["notify"]["target"] == "job:decision_request_pipeline"
     assert routines["poll"]["trigger"]["cron"]
+    # Daily at 08:00 host-local. A routine has no `dedupe` key, so `overlap: forbid` (skip a
+    # fire while the last digest still runs) is its form of skip_if_open.
+    assert routines["digest"]["trigger"]["cron"] == "0 8 * * *"
+    assert routines["digest"]["target"] == "job:decision_mail_digest_pipeline"
+    assert routines["digest"]["policy"]["overlap"] == "forbid"
+    assert "dedupe" not in routines["digest"]
     for job in jobs.values():
         for step in job["spec"]["steps"]:
             assert step["target"].removeprefix("activity:") in activities
     called = {activity["spec"]["config"]["tool"] for activity in activities.values()}
-    assert called == {f"{NAMESPACE}.notify", f"{NAMESPACE}.poll"}
+    assert called == {f"{NAMESPACE}.notify", f"{NAMESPACE}.poll", f"{NAMESPACE}.digest"}
 
 
 def test_goldens_satisfy_the_output_schemas(tmp_path: Path) -> None:
@@ -181,7 +188,7 @@ def test_goldens_satisfy_the_output_schemas(tmp_path: Path) -> None:
     assert core.calls == []
 
 
-@pytest.mark.parametrize("name", ["notify", "poll"])
+@pytest.mark.parametrize("name", ["notify", "poll", "digest"])
 def test_definitions_call_the_tools_with_no_input(name: str) -> None:
     activity = definitions("activities")[f"decision_mail_{name}"]
     assert activity["spec"]["action"] == "plugin.tool_call"

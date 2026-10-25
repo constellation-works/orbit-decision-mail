@@ -31,10 +31,19 @@ README.md has the full tables; keep them and this summary in step with the manif
   the newest 20 events; the dashboard panel "Drops and refusals" reads this tool),
   `notify` (mutating: mails each open request once), `poll` (mutating: authenticates
   replies, submits through `orbit.decision.submit`, mails a confirmation or refusal, files
-  the mail), `parse-reply` (read-only: the reply grammar on a given text).
+  the mail), `digest` (mutating: core's `orbit.decision.digest` raises proposed/review
+  approvals, then one numbered mail of proposed tasks, held requests and expiring ones; a
+  reply like `approve 1,3` / `reject 2` is judged whole, a bare verb or out-of-range number
+  is refused with a re-listing and consumes no token), `parse-reply` (read-only: the reply
+  grammar on a given text).
+- Batching is plugin config, not core: `digest_mode` (`immediate`, `daily` default: only
+  `block_triage` mails at once, `off`) and `quiet_hours` (`HH:MM-HH:MM` host-local; a send
+  inside it fails retryable `quiet_hours` and goes at the window end). The seeded
+  `decision-mail-digest` routine is disabled, cron `0 8 * * *`, `overlap: forbid` (routines
+  reject `dedupe`).
 - Callbacks (`permissions.orbit_tools`): `orbit.decision.list`, `orbit.decision.show`,
-  `orbit.decision.submit`, `orbit.task.show`. They run as `orbit tool run … --input-file`
-  with the inherited fd-3 callback session and never with `--model`/`--agent`.
+  `orbit.decision.submit`, `orbit.decision.digest`, `orbit.task.show`. They run as
+  `orbit tool run … --input-file` with the inherited fd-3 callback session and never with `--model`/`--agent`.
 - Required config keys: `address`, `notify_to`, `allowed_senders`, `authserv_id`,
   `smtp_host`, `imap_host`. Defaults cover ports/security, usernames, folders, `channel`
   (`email`), `key_epoch` (`1`), `plus_addressing`, `dashboard_url`, `max_messages` and
@@ -43,9 +52,9 @@ README.md has the full tables; keep them and this summary in step with the manif
   copies from `orbit decision channel list` after `register` and every `rotate-key`.
 - Plugin state (`$ORBIT_PLUGIN_STATE/mail/state.json`, under an flock) records what was
   mailed, refusal-mail times (one per request per hour), the unparseable-reply loop guard,
-  recent drops, and cumulative counters plus the newest 20 events (sender, reason, request
+  recent drops, batched confirmations awaiting the next digest, and cumulative counters plus the newest 20 events (sender, reason, request
   id and time; the 21st evicts the oldest). It never holds a secret, a token, a body or a
-  header dump. Schema 2 is stamped on the next save; a schema 1 file still loads.
+  header dump. Schema 3 is stamped on the next save; schema 1 and 2 files still load.
 - Operator steps are `docs/runbook.md` (mailbox `Authentication-Results`, install and
   grants, secrets, `orbit decision channel register email --human daniel --plugin
   decision-mail --allow-sender <address>`, routines, `rotate-key`, revoke, SMTP/IMAP
