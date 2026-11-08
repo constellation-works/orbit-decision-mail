@@ -1,4 +1,4 @@
-.PHONY: check lint test sync export
+.PHONY: check lint test sync export standards-check
 
 sync:
 	uv sync
@@ -12,7 +12,10 @@ lint:
 test:
 	uv run pytest -q
 
-check: lint test
+standards-check:
+	sh docs/standards/check.sh
+
+check: lint test standards-check
 
 # Export the committed source (Orbit reads its .orbit-plugin/) for `orbit plugin validate/test/add`.
 # Always from HEAD, never the working tree; the path names the commit.
