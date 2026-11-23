@@ -1,69 +1,45 @@
 # Agent guidance
 
-- This repository is `orbit-decision-mail`: the email transport plugin (`decision-mail`) for
-  Orbit's human decision channel. Python, standard library only at runtime; `uv` for dev
-  tooling. The spec is Orbit's `docs/design/human-decision-channel/2_design.md`; where this
-  repo and the design differ, the design wins until it is amended.
-- The plugin is a transport, not an authority. It never applies a decision itself: every
-  answer goes through `orbit.decision.submit`, and core re-checks the token and the
-  authentication verdicts. Never add a path that moves a task directly.
-- Credentials never cross the tool boundary. No tool accepts or returns a password, key or
-  token; mailbox credentials and the channel key arrive only as declared plugin secrets in
-  `context.secrets`. Never log a secret value or put one in an error `detail`.
-- Mail is untrusted data. Message bodies and headers are parsed, never executed or
-  followed, and only the closed answer grammar of design §6 is accepted.
-- Tests never touch the network or a real mailbox: use fakes for SMTP and IMAP. Live mailbox
-  checks belong to the operator on dk-server-2.
-- `.orbit-plugin/` is the installable plugin and the only copy of the code. A tool change
-  updates its schema, its goldens and `tests/test_plugin_tree.py` together. No symlinks in
-  the plugin tree. Keep `dependencies = []`; a runtime dependency needs a design note first.
-- `agent-main` is the base branch and changes land on it directly. Daniel owns releases,
-  `orbit plugin add/upgrade/enable` with grants, the mailbox and its secrets, and channel
-  registration.
+`orbit-decision-mail` is the email transport plugin (`decision-mail`) for Orbit's human decision channel: it mails decision requests and turns authenticated replies into decisions. The spec is Orbit's human-decision-channel design, linked from README.md; where this repo and that design differ, the design wins until it is amended. `CLAUDE.md` is a symlink to this file.
+
+## Rules
+
+- The plugin is a transport, not an authority: every answer goes through `orbit.decision.submit`, which re-checks the token and the authentication verdicts.
+- Never add a path that moves a task directly.
+- Credentials never cross the tool boundary (README.md § Tools). Mailbox credentials and the channel key arrive only as declared plugin secrets in `context.secrets`.
+- Never log a secret value or put one in an error `detail`; STD-05 §R13 and §R14 govern redaction.
+- Mail is untrusted data: message bodies and headers are parsed, never executed or followed, and only the closed answer grammar of design §6 is accepted.
+- Plugin state never holds a secret, a token, a message body or a header dump.
+- Daniel owns releases, `orbit plugin add/upgrade/enable` with grants, the mailbox and its secrets, and channel registration.
+
+## Branching
+
+- `agent-main` is the base branch, and changes land on it directly.
+
+## Gates
+
 - Run `make check` before handing off.
+
+## Code
+
+- `.orbit-plugin/` is the installable plugin and the only copy of the code. A tool change updates its schema, its goldens and `tests/test_plugin_tree.py` together.
+- No symlinks in the plugin tree.
+- Keep `dependencies = []` in `pyproject.toml`; a runtime dependency needs a design note first.
+- A change to plugin state holds its lock (STD-03 §R6) and keeps every older state format readable (STD-03 §R24).
+
+## Tests
+
+- Tests are hermetic (STD-04 §R7): SMTP and IMAP are the fakes in `tests/fakes.py`, and no test touches the network or a real mailbox.
+- Live mailbox checks are the operator's install check on dk-server-2, described in `docs/runbook.md`; no worker or test runs one.
 
 ## Tools, config and operator steps
 
-README.md has the full tables; keep them and this summary in step with the manifest.
-
-- Tools: `status` (read-only: readiness, missing keys/secrets by name, activity),
-  `activity` (read-only: cumulative drop, refusal, SMTP/IMAP and loop-guard counters and
-  the newest 20 events; the dashboard panel "Drops and refusals" reads this tool),
-  `notify` (mutating: mails each open request once), `poll` (mutating: authenticates
-  replies, submits through `orbit.decision.submit`, mails a confirmation or refusal, files
-  the mail), `digest` (mutating: core's `orbit.decision.digest` raises proposed/review
-  approvals, then one numbered mail of proposed tasks, held requests and expiring ones; a
-  reply like `approve 1,3` / `reject 2` is judged whole, a bare verb or out-of-range number
-  is refused with a re-listing and consumes no token), `parse-reply` (read-only: the reply
-  grammar on a given text).
-- Batching is plugin config, not core: `digest_mode` (`immediate`, `daily` default: only
-  `block_triage` mails at once, `off`) and `quiet_hours` (`HH:MM-HH:MM` host-local; a send
-  inside it fails retryable `quiet_hours` and goes at the window end). The seeded
-  `decision-mail-digest` routine is disabled, cron `0 8 * * *`, `overlap: forbid` (routines
-  reject `dedupe`).
-- Callbacks (`permissions.orbit_tools`): `orbit.decision.list`, `orbit.decision.show`,
-  `orbit.decision.submit`, `orbit.decision.digest`, `orbit.task.show`. They run as
-  `orbit tool run … --input-file` with the inherited fd-3 callback session and never with `--model`/`--agent`.
-- Required config keys: `address`, `notify_to`, `allowed_senders`, `authserv_id`,
-  `smtp_host`, `imap_host`. Defaults cover ports/security, usernames, folders, `channel`
-  (`email`), `key_epoch` (`1`), `plus_addressing`, `dashboard_url`, `max_messages` and
-  `from_name`. Secrets: `smtp_password`, `imap_password`, `channel_key`.
-- The plugin cannot read the channel's key epoch, so `key_epoch` is config the operator
-  copies from `orbit decision channel list` after `register` and every `rotate-key`.
-- Plugin state (`$ORBIT_PLUGIN_STATE/mail/state.json`, under an flock) records what was
-  mailed, refusal-mail times (one per request per hour), the unparseable-reply loop guard,
-  recent drops, batched confirmations awaiting the next digest, and cumulative counters plus the newest 20 events (sender, reason, request
-  id and time; the 21st evicts the oldest). It never holds a secret, a token, a body or a
-  header dump. Schema 3 is stamped on the next save; schema 1 and 2 files still load.
-- Operator steps are `docs/runbook.md` (mailbox `Authentication-Results`, install and
-  grants, secrets, `orbit decision channel register email --human daniel --plugin
-  decision-mail --allow-sender <address>`, routines, `rotate-key`, revoke, SMTP/IMAP
-  recovery). In short: `orbit plugin add` a fresh export; `orbit plugin enable
-  decision-mail --grant 'fs={{plugin_state}}' --grant network --grant orbit_tools`; `orbit
-  plugin secret set decision-mail smtp_password|imap_password`; set the config keys with
-  `orbit config set plugins.decision-mail.<key>`; `[decision_channel] enabled = true`;
-  register the channel (mirrors `channel_key`); set `key_epoch`; set the
-  `decision-mail-notify` routine's `owner_machine` and `branch`; enable both routines.
+- `README.md` holds the full tool, config and batching tables. Keep them in step with `.orbit-plugin/plugin.yaml` and its schemas.
+- Tools and their kinds are in README.md § Tools. Config keys, defaults and secrets are in README.md § Config, and `.orbit-plugin/schemas/config.json` documents each key.
+- Reply handling, batching, quiet hours and the digest are in README.md § How poll treats a reply and § Batching, quiet hours and the digest.
+- Callbacks run through the `orbit_tools` grant listed in `.orbit-plugin/plugin.yaml`, as `orbit tool run … --input-file` on the inherited fd-3 session, and never with `--model` or `--agent`.
+- The plugin cannot read the channel's key epoch. `key_epoch` is operator config, copied from `orbit decision channel list` after `register` and after each `rotate-key`.
+- Operator steps (mailbox stamp, install and grants, secrets, registration, routines, key rotation, revocation, outage recovery) are in `docs/runbook.md`.
 
 <!-- constellation-standards:begin -->
 <!-- Managed by the constellation's operations/scripts/sync-standards.sh; edits inside this block are overwritten. -->
